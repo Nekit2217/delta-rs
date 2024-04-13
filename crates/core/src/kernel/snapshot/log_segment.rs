@@ -117,6 +117,7 @@ impl LogSegment {
             commit_files: commit_files.into(),
             checkpoint_files,
         };
+
         if segment.commit_files.is_empty() && segment.checkpoint_files.is_empty() {
             return Err(DeltaTableError::NotATable("no log files".into()));
         }

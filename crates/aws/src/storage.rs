@@ -3,7 +3,7 @@
 use aws_config::{Region, SdkConfig};
 use bytes::Bytes;
 use deltalake_core::storage::object_store::{
-    aws::AmazonS3ConfigKey, parse_url_opts, GetOptions, GetResult, ListResult, MultipartId,
+    aws::AmazonS3ConfigKey, parse_url_opts, GetOptions, GetResult, ListResult,
     ObjectMeta, ObjectStore, PutOptions, PutResult, Result as ObjectStoreResult,
 };
 use deltalake_core::storage::{str_is_truthy, ObjectStoreFactory, ObjectStoreRef, StorageOptions};
@@ -16,7 +16,7 @@ use std::ops::Range;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWrite;
+use object_store::MultipartUpload;
 use url::Url;
 
 use crate::errors::DynamoDbConfigError;
@@ -358,17 +358,17 @@ impl ObjectStore for S3StorageBackend {
     async fn put_multipart(
         &self,
         location: &Path,
-    ) -> ObjectStoreResult<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)> {
+    ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
         self.inner.put_multipart(location).await
     }
 
-    async fn abort_multipart(
-        &self,
-        location: &Path,
-        multipart_id: &MultipartId,
-    ) -> ObjectStoreResult<()> {
-        self.inner.abort_multipart(location, multipart_id).await
-    }
+    // async fn abort_multipart(
+    //     &self,
+    //     location: &Path,
+    //     multipart_id: &MultipartId,
+    // ) -> ObjectStoreResult<()> {
+    //     self.inner.abort_multipart(location, multipart_id).await
+    // }
 }
 
 /// Storage option keys to use when creating [crate::storage::s3::S3StorageOptions].
