@@ -197,10 +197,11 @@ impl Snapshot {
     }
 
     /// Get the files in the snapshot
-    pub fn files(
+    pub fn files<'a>(
         &self,
         store: Arc<dyn ObjectStore>,
-    ) -> DeltaResult<ReplayStream<BoxStream<'_, DeltaResult<RecordBatch>>>> {
+        visitors: Vec<&'a mut dyn ReplayVisitor>,
+    ) -> DeltaResult<ReplayStream<'a, BoxStream<'_, DeltaResult<RecordBatch>>>> {
         let log_stream = self.log_segment.commit_stream(
             store.clone(),
             &log_segment::COMMIT_SCHEMA,
@@ -211,7 +212,7 @@ impl Snapshot {
             &log_segment::CHECKPOINT_SCHEMA,
             &self.config,
         );
-        ReplayStream::try_new(log_stream, checkpoint_stream, self)
+        ReplayStream::try_new(log_stream, checkpoint_stream, self, visitors)
     }
 
     /// Get the commit infos in the snapshot
@@ -331,6 +332,12 @@ impl Snapshot {
     }
 }
 
+/// Allows hooking into the reading of commit files and checkpoints whenever a table is loaded or updated.
+pub trait ReplayVisitor: Send {
+    /// Process a batch
+    fn visit_batch(&mut self, batch: &RecordBatch) -> DeltaResult<()>;
+}
+
 /// A snapshot of a Delta table that has been eagerly loaded into memory.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EagerSnapshot {
@@ -348,8 +355,19 @@ impl EagerSnapshot {
         config: DeltaTableConfig,
         version: Option<i64>,
     ) -> DeltaResult<Self> {
+        Self::try_new_with_visitor(table_root, store, config, version, vec![]).await
+    }
+
+    /// Create a new [`EagerSnapshot`] instance
+    pub async fn try_new_with_visitor(
+        table_root: &Path,
+        store: Arc<dyn ObjectStore>,
+        config: DeltaTableConfig,
+        version: Option<i64>,
+        visitors: Vec<&mut dyn ReplayVisitor>,
+    ) -> DeltaResult<Self> {
         let snapshot = Snapshot::try_new(table_root, store.clone(), config, version).await?;
-        let files = snapshot.files(store)?.try_collect().await?;
+        let files = snapshot.files(store, visitors)?.try_collect().await?;
         Ok(Self { snapshot, files })
     }
 
@@ -368,14 +386,16 @@ impl EagerSnapshot {
     }
 
     /// Update the snapshot to the given version
-    pub async fn update(
+    pub async fn update<'a>(
         &mut self,
         log_store: Arc<dyn LogStore>,
         target_version: Option<i64>,
+        visitors: Vec<&'a mut dyn ReplayVisitor>,
     ) -> DeltaResult<()> {
         if Some(self.version()) == target_version {
             return Ok(());
         }
+
         let new_slice = self
             .snapshot
             .update_inner(log_store.clone(), target_version)
@@ -399,10 +419,11 @@ impl EagerSnapshot {
                     .boxed()
             };
             let mapper = LogMapper::try_new(&self.snapshot)?;
-            let files = ReplayStream::try_new(log_stream, checkpoint_stream, &self.snapshot)?
-                .map(|batch| batch.and_then(|b| mapper.map_batch(b)))
-                .try_collect()
-                .await?;
+            let files =
+                ReplayStream::try_new(log_stream, checkpoint_stream, &self.snapshot, visitors)?
+                    .map(|batch| batch.and_then(|b| mapper.map_batch(b)))
+                    .try_collect()
+                    .await?;
 
             self.files = files;
         }
@@ -476,6 +497,7 @@ impl EagerSnapshot {
     pub fn advance<'a>(
         &mut self,
         commits: impl IntoIterator<Item = &'a CommitData>,
+        mut visitors: Vec<&'a mut dyn ReplayVisitor>,
     ) -> DeltaResult<i64> {
         let mut metadata = None;
         let mut protocol = None;
@@ -506,7 +528,11 @@ impl EagerSnapshot {
         let mut scanner = LogReplayScanner::new();
 
         for batch in actions {
-            files.push(scanner.process_files_batch(&batch?, true)?);
+            let batch = batch?;
+            files.push(scanner.process_files_batch(&batch, true)?);
+            for visitor in &mut visitors {
+                visitor.visit_batch(&batch)?;
+            }
         }
 
         let mapper = LogMapper::try_new(&self.snapshot)?;
@@ -652,7 +678,7 @@ mod tests {
         assert_eq!(tombstones.len(), 31);
 
         let batches = snapshot
-            .files(store.clone())?
+            .files(store.clone(), vec![])?
             .try_collect::<Vec<_>>()
             .await?;
         let expected = [
@@ -778,9 +804,10 @@ mod tests {
             predicate: None,
         };
 
-        let actions = vec![CommitData::new(removes, operation, HashMap::new()).unwrap()];
+        let actions =
+            vec![CommitData::new(removes, operation, HashMap::new(), Vec::new()).unwrap()];
 
-        let new_version = snapshot.advance(&actions)?;
+        let new_version = snapshot.advance(&actions, vec![])?;
         assert_eq!(new_version, version + 1);
 
         let new_files = snapshot.file_actions()?.map(|f| f.path).collect::<Vec<_>>();

@@ -83,20 +83,22 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use self::conflict_checker::{CommitConflictError, TransactionInfo, WinningCommitSummary};
-use crate::checkpoints::create_checkpoint_for;
+// use crate::checkpoints::create_checkpoint_for;
 use crate::errors::DeltaTableError;
 use crate::kernel::{
-    Action, CommitInfo, EagerSnapshot, Metadata, Protocol, ReaderFeatures, WriterFeatures,
+    Action, CommitInfo, EagerSnapshot, Metadata, Protocol, ReaderFeatures, Txn, WriterFeatures,
 };
 use crate::logstore::LogStoreRef;
 use crate::protocol::DeltaOperation;
 use crate::storage::ObjectStoreRetryExt;
 use crate::table::config::TableConfig;
-use crate::table::state::DeltaTableState;
+use crate::table::state::{DeltaTableState};
 use crate::{crate_version, DeltaResult};
 
 pub use self::protocol::INSTANCE as PROTOCOL;
 
+#[cfg(test)]
+pub(crate) mod application;
 mod conflict_checker;
 mod protocol;
 #[cfg(feature = "datafusion")]
@@ -247,6 +249,7 @@ impl TableReference for DeltaTableState {
 }
 
 /// Data that was actually written to the log store.
+#[derive(Debug)]
 pub struct CommitData {
     /// The actions
     pub actions: Vec<Action>,
@@ -254,6 +257,8 @@ pub struct CommitData {
     pub operation: DeltaOperation,
     /// The Metadata
     pub app_metadata: HashMap<String, Value>,
+    /// Application specific transaction
+    pub app_transactions: Vec<Txn>,
 }
 
 impl CommitData {
@@ -262,6 +267,7 @@ impl CommitData {
         mut actions: Vec<Action>,
         operation: DeltaOperation,
         mut app_metadata: HashMap<String, Value>,
+        app_transactions: Vec<Txn>,
     ) -> Result<Self, CommitBuilderError> {
         if !actions.iter().any(|a| matches!(a, Action::CommitInfo(..))) {
             let mut commit_info = operation.get_commit_info();
@@ -274,10 +280,16 @@ impl CommitData {
             commit_info.info = app_metadata.clone();
             actions.push(Action::CommitInfo(commit_info))
         }
+
+        for txn in &app_transactions {
+            actions.push(Action::Txn(txn.clone()))
+        }
+
         Ok(CommitData {
             actions,
             operation,
             app_metadata,
+            app_transactions,
         })
     }
 
@@ -302,27 +314,29 @@ impl CommitData {
     }
 }
 
-#[derive(Clone, Debug, Copy)]
-/// Properties for post commit hook.
-pub struct PostCommitHookProperties {
-    create_checkpoint: bool,
-}
+// #[derive(Clone, Debug, Copy)]
+// /// Properties for post commit hook.
+// pub struct PostCommitHookProperties {
+//     create_checkpoint: bool,
+// }
 
 #[derive(Clone, Debug)]
 /// End user facing interface to be used by operations on the table.
 /// Enable controling commit behaviour and modifying metadata that is written during a commit.
 pub struct CommitProperties {
     pub(crate) app_metadata: HashMap<String, Value>,
+    pub(crate) app_transaction: Vec<Txn>,
     max_retries: usize,
-    create_checkpoint: bool,
+    // create_checkpoint: bool,
 }
 
 impl Default for CommitProperties {
     fn default() -> Self {
         Self {
             app_metadata: Default::default(),
+            app_transaction: Vec::new(),
             max_retries: DEFAULT_RETRIES,
-            create_checkpoint: true,
+            // create_checkpoint: true,
         }
     }
 }
@@ -331,15 +345,27 @@ impl CommitProperties {
     /// Specify metadata the be comitted
     pub fn with_metadata(
         mut self,
-        metadata: impl IntoIterator<Item = (String, serde_json::Value)>,
+        metadata: impl IntoIterator<Item=(String, serde_json::Value)>,
     ) -> Self {
         self.app_metadata = HashMap::from_iter(metadata);
         self
     }
 
     /// Specify if it should create a checkpoint when the commit interval condition is met
-    pub fn with_create_checkpoint(mut self, create_checkpoint: bool) -> Self {
-        self.create_checkpoint = create_checkpoint;
+    // pub fn with_create_checkpoint(mut self, create_checkpoint: bool) -> Self {
+    //     self.create_checkpoint = create_checkpoint;
+    //     self
+    // }
+
+    /// Add an additonal application transaction to the commit
+    pub fn with_application_transaction(mut self, txn: Txn) -> Self {
+        self.app_transaction.push(txn);
+        self
+    }
+
+    /// Override application transactions for the commit
+    pub fn with_application_transactions(mut self, txn: Vec<Txn>) -> Self {
+        self.app_transaction = txn;
         self
     }
 }
@@ -349,10 +375,11 @@ impl From<CommitProperties> for CommitBuilder {
         CommitBuilder {
             max_retries: value.max_retries,
             app_metadata: value.app_metadata,
-            post_commit_hook: PostCommitHookProperties {
-                create_checkpoint: value.create_checkpoint,
-            }
-            .into(),
+            app_transaction: value.app_transaction,
+            // post_commit_hook: PostCommitHookProperties {
+            //     create_checkpoint: value.create_checkpoint,
+            // }
+            // .into(),
             ..Default::default()
         }
     }
@@ -362,8 +389,9 @@ impl From<CommitProperties> for CommitBuilder {
 pub struct CommitBuilder {
     actions: Vec<Action>,
     app_metadata: HashMap<String, Value>,
+    app_transaction: Vec<Txn>,
     max_retries: usize,
-    post_commit_hook: Option<PostCommitHookProperties>,
+    // post_commit_hook: Option<PostCommitHookProperties>,
 }
 
 impl Default for CommitBuilder {
@@ -371,8 +399,9 @@ impl Default for CommitBuilder {
         CommitBuilder {
             actions: Vec::new(),
             app_metadata: HashMap::new(),
+            app_transaction: Vec::new(),
             max_retries: DEFAULT_RETRIES,
-            post_commit_hook: None,
+            // post_commit_hook: None,
         }
     }
 }
@@ -397,10 +426,10 @@ impl<'a> CommitBuilder {
     }
 
     /// Specify all the post commit hook properties
-    pub fn with_post_commit_hook(mut self, post_commit_hook: PostCommitHookProperties) -> Self {
-        self.post_commit_hook = post_commit_hook.into();
-        self
-    }
+    // pub fn with_post_commit_hook(mut self, post_commit_hook: PostCommitHookProperties) -> Self {
+    //     self.post_commit_hook = post_commit_hook.into();
+    //     self
+    // }
 
     /// Prepare a Commit operation using the configured builder
     pub fn build(
@@ -409,13 +438,18 @@ impl<'a> CommitBuilder {
         log_store: LogStoreRef,
         operation: DeltaOperation,
     ) -> Result<PreCommit<'a>, CommitBuilderError> {
-        let data = CommitData::new(self.actions, operation, self.app_metadata)?;
+        let data = CommitData::new(
+            self.actions,
+            operation,
+            self.app_metadata,
+            self.app_transaction,
+        )?;
         Ok(PreCommit {
             log_store,
             table_data,
             max_retries: self.max_retries,
             data,
-            post_commit_hook: self.post_commit_hook,
+            // post_commit_hook: self.post_commit_hook,
         })
     }
 }
@@ -426,7 +460,7 @@ pub struct PreCommit<'a> {
     table_data: Option<&'a dyn TableReference>,
     data: CommitData,
     max_retries: usize,
-    post_commit_hook: Option<PostCommitHookProperties>,
+    // post_commit_hook: Option<PostCommitHookProperties>,
 }
 
 impl<'a> std::future::IntoFuture for PreCommit<'a> {
@@ -436,7 +470,7 @@ impl<'a> std::future::IntoFuture for PreCommit<'a> {
     fn into_future(self) -> Self::IntoFuture {
         let this = self;
 
-        Box::pin(async move { this.into_prepared_commit_future().await?.await?.await })
+        Box::pin(async move { this.into_prepared_commit_future().await?.await })
     }
 }
 
@@ -466,7 +500,7 @@ impl<'a> PreCommit<'a> {
                 table_data: this.table_data,
                 max_retries: this.max_retries,
                 data: this.data,
-                post_commit: this.post_commit_hook,
+                // post_commit: this.post_commit_hook,
             })
         })
     }
@@ -479,7 +513,7 @@ pub struct PreparedCommit<'a> {
     data: CommitData,
     table_data: Option<&'a dyn TableReference>,
     max_retries: usize,
-    post_commit: Option<PostCommitHookProperties>,
+    // post_commit: Option<PostCommitHookProperties>,
 }
 
 impl<'a> PreparedCommit<'a> {
@@ -490,7 +524,7 @@ impl<'a> PreparedCommit<'a> {
 }
 
 impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
-    type Output = DeltaResult<PostCommit<'a>>;
+    type Output = DeltaResult<FinalizedCommit>;
     type IntoFuture = BoxFuture<'a, Self::Output>;
 
     fn into_future(self) -> Self::IntoFuture {
@@ -501,12 +535,9 @@ impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
 
             if this.table_data.is_none() {
                 this.log_store.write_commit_entry(0, tmp_commit).await?;
-                return Ok(PostCommit {
+                return Ok(FinalizedCommit {
                     version: 0,
                     data: this.data,
-                    create_checkpoint: false,
-                    log_store: this.log_store,
-                    table_data: this.table_data,
                 });
             }
 
@@ -525,16 +556,10 @@ impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
                 let version = read_snapshot.version() + attempt_number as i64;
                 match this.log_store.write_commit_entry(version, tmp_commit).await {
                     Ok(()) => {
-                        return Ok(PostCommit {
+                        return Ok(FinalizedCommit {
                             version,
                             data: this.data,
-                            create_checkpoint: this
-                                .post_commit
-                                .map(|v| v.create_checkpoint)
-                                .unwrap_or_default(),
-                            log_store: this.log_store,
-                            table_data: this.table_data,
-                        });
+                        })
                     }
                     Err(TransactionError::VersionAlreadyExists(version)) => {
                         let summary = WinningCommitSummary::try_new(
@@ -542,7 +567,7 @@ impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
                             version - 1,
                             version,
                         )
-                        .await?;
+                            .await?;
                         let transaction_info = TransactionInfo::try_new(
                             read_snapshot,
                             this.data.operation.read_predicate(),
@@ -583,54 +608,56 @@ impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
 }
 
 /// Represents items for the post commit hook
-pub struct PostCommit<'a> {
-    /// The winning version number of the commit
-    pub version: i64,
-    /// The data that was comitted to the log store
-    pub data: CommitData,
-    create_checkpoint: bool,
-    log_store: LogStoreRef,
-    table_data: Option<&'a dyn TableReference>,
-}
+// pub struct PostCommit<'a> {
+//     /// The winning version number of the commit
+//     pub version: i64,
+//     /// The data that was comitted to the log store
+//     pub data: CommitData,
+//     create_checkpoint: bool,
+//     log_store: LogStoreRef,
+//     table_data: Option<&'a dyn TableReference>,
+// }
 
-impl<'a> PostCommit<'a> {
-    /// Runs the post commit activities
-    async fn run_post_commit_hook(
-        &self,
-        version: i64,
-        commit_data: &CommitData,
-    ) -> DeltaResult<()> {
-        if self.create_checkpoint {
-            self.create_checkpoint(&self.table_data, &self.log_store, version, commit_data)
-                .await?
-        }
-        Ok(())
-    }
-    async fn create_checkpoint(
-        &self,
-        table: &Option<&'a dyn TableReference>,
-        log_store: &LogStoreRef,
-        version: i64,
-        commit_data: &CommitData,
-    ) -> DeltaResult<()> {
-        if let Some(table) = table {
-            let checkpoint_interval = table.config().checkpoint_interval() as i64;
-            if ((version + 1) % checkpoint_interval) == 0 {
-                // We have to advance the snapshot otherwise we can't create a checkpoint
-                let mut snapshot = table.eager_snapshot().unwrap().clone();
-                snapshot.advance(vec![commit_data])?;
-                let state = DeltaTableState {
-                    app_transaction_version: HashMap::new(),
-                    snapshot,
-                };
-                create_checkpoint_for(version, &state, log_store.as_ref()).await?
-            }
-        }
-        Ok(())
-    }
-}
+// impl<'a> PostCommit<'a> {
+//     /// Runs the post commit activities
+//     async fn run_post_commit_hook(
+//         &self,
+//         version: i64,
+//         commit_data: &CommitData,
+//     ) -> DeltaResult<()> {
+//         if self.create_checkpoint {
+//             // self.create_checkpoint(&self.table_data, &self.log_store, version, commit_data)
+//             //     .await?
+//         }
+//         Ok(())
+//     }
+//     // async fn create_checkpoint(
+//     //     &self,
+//     //     table: &Option<&'a dyn TableReference>,
+//     //     log_store: &LogStoreRef,
+//     //     version: i64,
+//     //     commit_data: &CommitData,
+//     // ) -> DeltaResult<()> {
+//     //     if let Some(table) = table {
+//     //         let checkpoint_interval = table.config().checkpoint_interval() as i64;
+//     //         if ((version + 1) % checkpoint_interval) == 0 {
+//     //             // We have to advance the snapshot otherwise we can't create a checkpoint
+//     //             let mut snapshot = table.eager_snapshot().unwrap().clone();
+//     //             let mut app_visitor = AppTransactionVisitor::new();
+//     //             snapshot.advance(vec![commit_data], vec![&mut app_visitor])?;
+//     //             let state = DeltaTableState {
+//     //                 app_transaction_version: app_visitor.app_transaction_version,
+//     //                 snapshot,
+//     //             };
+//     //             create_checkpoint_for(version, &state, log_store.as_ref()).await?
+//     //         }
+//     //     }
+//     //     Ok(())
+//     // }
+// }
 
 /// A commit that successfully completed
+#[derive(Debug)]
 pub struct FinalizedCommit {
     /// The winning version number of the commit
     pub version: i64,
@@ -650,26 +677,26 @@ impl FinalizedCommit {
     }
 }
 
-impl<'a> std::future::IntoFuture for PostCommit<'a> {
-    type Output = DeltaResult<FinalizedCommit>;
-    type IntoFuture = BoxFuture<'a, Self::Output>;
-
-    fn into_future(self) -> Self::IntoFuture {
-        let this = self;
-
-        Box::pin(async move {
-            match this.run_post_commit_hook(this.version, &this.data).await {
-                Ok(_) => {
-                    return Ok(FinalizedCommit {
-                        version: this.version,
-                        data: this.data,
-                    })
-                }
-                Err(err) => return Err(err),
-            };
-        })
-    }
-}
+// impl<'a> std::future::IntoFuture for PostCommit<'a> {
+//     type Output = DeltaResult<FinalizedCommit>;
+//     type IntoFuture = BoxFuture<'a, Self::Output>;
+//
+//     fn into_future(self) -> Self::IntoFuture {
+//         let this = self;
+//
+//         Box::pin(async move {
+//             match this.run_post_commit_hook(this.version, &this.data).await {
+//                 Ok(_) => {
+//                     return Ok(FinalizedCommit {
+//                         version: this.version,
+//                         data: this.data,
+//                     })
+//                 }
+//                 Err(err) => return Err(err),
+//             };
+//         })
+//     }
+// }
 
 #[cfg(test)]
 mod tests {

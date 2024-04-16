@@ -813,6 +813,7 @@ impl std::future::IntoFuture for WriteBuilder {
             // then again, having only some tombstones may be misleading.
             if let Some(mut snapshot) = this.snapshot {
                 snapshot.merge(commit.data.actions, &commit.data.operation, commit.version)?;
+
                 Ok(DeltaTable::new_with_state(this.log_store, snapshot))
             } else {
                 let mut table = DeltaTable::new(this.log_store, Default::default());
