@@ -24,6 +24,12 @@ mod simple_checkpoint {
             .await
             .unwrap();
 
+        let transactions = table.get_app_transaction_version();
+        assert_eq!(transactions.get("appId-1").cloned(), Some(11));
+        assert_eq!(transactions.get("appId-2").cloned(), Some(12));
+        assert_eq!(transactions.get("appId-3"), None);
+        assert_eq!(transactions.get("appId-4"), None);
+
         // Write a checkpoint
         checkpoints::create_checkpoint(&table).await.unwrap();
 
@@ -38,6 +44,14 @@ mod simple_checkpoint {
         table.load_version(10).await.unwrap();
         checkpoints::create_checkpoint(&table).await.unwrap();
 
+        println!("{:?}", table.get_app_transaction_version());
+
+        let transactions = table.get_app_transaction_version();
+        assert_eq!(transactions.get("appId-1").cloned(), Some(17));
+        assert_eq!(transactions.get("appId-2").cloned(), Some(18));
+        assert_eq!(transactions.get("appId-3").cloned(), Some(3));
+        assert_eq!(transactions.get("appId-4").cloned(), Some(4));
+
         // checkpoint should exist
         let checkpoint_path = log_path.join("00000000000000000010.checkpoint.parquet");
         assert!(checkpoint_path.as_path().exists());
@@ -49,6 +63,13 @@ mod simple_checkpoint {
         // delta table should load just fine with the checkpoint in place
         let table_result = deltalake_core::open_table(table_location).await.unwrap();
         let table = table_result;
+
+        let transactions = table.get_app_transaction_version();
+        assert_eq!(transactions.get("appId-1").cloned(), Some(17));
+        assert_eq!(transactions.get("appId-2").cloned(), Some(18));
+        assert_eq!(transactions.get("appId-3").cloned(), Some(7));
+        assert_eq!(transactions.get("appId-4").cloned(), Some(7));
+
         let files = table.get_files_iter().unwrap();
         assert_eq!(12, files.count());
     }

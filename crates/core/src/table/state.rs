@@ -65,7 +65,7 @@ impl ReplayVisitor for AppTransactionVisitor {
             let app = ex::read_str(id, idx)?;
             let version = ex::read_primitive(version, idx)?;
 
-            self.app_transaction_version.insert(app.to_owned(), version);
+            self.app_transaction_version.entry(app.to_owned()).or_insert(version);
         }
 
         Ok(())
