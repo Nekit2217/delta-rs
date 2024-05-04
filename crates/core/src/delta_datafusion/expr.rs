@@ -22,7 +22,7 @@
 //! Utility functions for Datafusion's Expressions
 
 use std::{
-    fmt::{self, format, Display, Error, Formatter, Write},
+    fmt::{self, Display, Error, Formatter, Write},
     sync::Arc,
 };
 

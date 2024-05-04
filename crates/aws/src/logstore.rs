@@ -3,6 +3,7 @@
 //! when the underlying object storage does not support atomic `put_if_absent`
 //! or `rename_if_absent` operations, as is the case for S3.
 
+use std::time::Duration;
 use crate::errors::LockClientError;
 use crate::storage::S3StorageOptions;
 use crate::{constants, CommitEntry, DynamoDbLockClient, UpdateLogEntryResult};
@@ -93,15 +94,29 @@ impl S3DynamoDbLogStore {
                     debug!("Successfully committed entry for version {}", entry.version);
                     return self.try_complete_entry(entry, true).await;
                 }
-                // `N.json` has already been moved, complete the entry in DynamoDb just in case
-                Err(TransactionError::ObjectStore {
-                    source: ObjectStoreError::NotFound { .. },
-                }) => {
-                    warn!("It looks like the {}.json has already been moved, we got 404 from ObjectStorage.", entry.version);
-                    return self.try_complete_entry(entry, false).await;
-                }
-                Err(err) if retry == MAX_REPAIR_RETRIES => return Err(err),
+                // // `N.json` has already been moved, complete the entry in DynamoDb just in case
+                // Err(TransactionError::ObjectStore {
+                //     source: ObjectStoreError::NotFound { .. },
+                // }) => {
+                //     warn!("It looks like the {}.json has already been moved, we got 404 from ObjectStorage.", entry.version);
+                //     return self.try_complete_entry(entry, false).await;
+                // }
+                Err(err) if retry == MAX_REPAIR_RETRIES => {
+                    return match err {
+                        TransactionError::ObjectStore { source: ObjectStoreError::NotFound { .. } } => {
+                            warn!("It looks like the {}.json has already been moved, we got 404 from ObjectStorage.", entry.version);
+                            self.try_complete_entry(entry, false).await
+                        },
+                        _ => Err(err)
+                    }
+                },
                 Err(err) => {
+                    match err {
+                        TransactionError::ObjectStore { source: ObjectStoreError::NotFound { .. } } => {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        },
+                        _ => {}
+                    }
                     debug!("retry #{retry} on log entry {entry:?} failed to move commit: '{err}'")
                 }
             }
