@@ -85,14 +85,12 @@ use std::collections::HashMap;
 use self::conflict_checker::{CommitConflictError, TransactionInfo, WinningCommitSummary};
 use crate::checkpoints::create_checkpoint_for;
 use crate::errors::DeltaTableError;
-use crate::kernel::{
-    Action, CommitInfo, EagerSnapshot, Metadata, Protocol, ReaderFeatures, Txn, WriterFeatures,
-};
+use crate::kernel::{Action, CommitInfo, EagerSnapshot, Metadata, Protocol, ReaderFeatures, Txn, WriterFeatures};
 use crate::logstore::LogStoreRef;
 use crate::protocol::DeltaOperation;
 use crate::storage::ObjectStoreRetryExt;
 use crate::table::config::TableConfig;
-use crate::table::state::{DeltaTableState};
+use crate::table::state::{AppTransactionVisitor, DeltaTableState};
 use crate::{crate_version, DeltaResult};
 
 pub use self::protocol::INSTANCE as PROTOCOL;
@@ -141,7 +139,7 @@ pub enum TransactionError {
 
     /// The transaction includes Remove action with data change but Delta table is append-only
     #[error(
-        "The transaction includes Remove action with data change but Delta table is append-only"
+    "The transaction includes Remove action with data change but Delta table is append-only"
     )]
     DeltaTableAppendOnly,
 
@@ -213,16 +211,16 @@ pub trait TableReference: Send + Sync {
 }
 
 impl TableReference for EagerSnapshot {
+    fn config(&self) -> TableConfig {
+        self.table_config()
+    }
+
     fn protocol(&self) -> &Protocol {
         EagerSnapshot::protocol(self)
     }
 
     fn metadata(&self) -> &Metadata {
         EagerSnapshot::metadata(self)
-    }
-
-    fn config(&self) -> TableConfig {
-        self.table_config()
     }
 
     fn eager_snapshot(&self) -> &EagerSnapshot {
@@ -249,7 +247,6 @@ impl TableReference for DeltaTableState {
 }
 
 /// Data that was actually written to the log store.
-#[derive(Debug)]
 pub struct CommitData {
     /// The actions
     pub actions: Vec<Action>,
@@ -293,6 +290,20 @@ impl CommitData {
         })
     }
 
+    /// Obtain the byte representation of the commit.
+    pub fn get_bytes2(&self) -> Result<bytes::Bytes, TransactionError> {
+        // Data MUST be read from the passed `CommitData`. Don't add data that is not sourced from there.
+        let actions = &self.actions;
+        Ok(bytes::Bytes::from(Self::log_entry_from_actions(actions)?))
+    }
+
+    /// Obtain the byte representation of the commit.
+    pub fn get_bytes(&self) -> Result<bytes::Bytes, TransactionError> {
+        // Data MUST be read from the passed `CommitData`. Don't add data that is not sourced from there.
+        let actions = &self.actions;
+        Ok(bytes::Bytes::from(Self::log_entry_from_actions(actions)?))
+    }
+
     /// Convert actions to their json representation
     pub fn log_entry_from_actions<'a>(
         actions: impl IntoIterator<Item = &'a Action>,
@@ -304,13 +315,6 @@ impl CommitData {
             jsons.push(json);
         }
         Ok(jsons.join("\n"))
-    }
-
-    /// Obtain the byte representation of the commit.
-    pub fn get_bytes(&self) -> Result<bytes::Bytes, TransactionError> {
-        // Data MUST be read from the passed `CommitData`. Don't add data that is not sourced from there.
-        let actions = &self.actions;
-        Ok(bytes::Bytes::from(Self::log_entry_from_actions(actions)?))
     }
 }
 
@@ -345,7 +349,7 @@ impl CommitProperties {
     /// Specify metadata the be comitted
     pub fn with_metadata(
         mut self,
-        metadata: impl IntoIterator<Item=(String, serde_json::Value)>,
+        metadata: impl IntoIterator<Item = (String, serde_json::Value)>,
     ) -> Self {
         self.app_metadata = HashMap::from_iter(metadata);
         self
@@ -354,18 +358,6 @@ impl CommitProperties {
     /// Specify if it should create a checkpoint when the commit interval condition is met
     pub fn with_create_checkpoint(mut self, create_checkpoint: bool) -> Self {
         self.create_checkpoint = create_checkpoint;
-        self
-    }
-
-    /// Add an additonal application transaction to the commit
-    pub fn with_application_transaction(mut self, txn: Txn) -> Self {
-        self.app_transaction.push(txn);
-        self
-    }
-
-    /// Override application transactions for the commit
-    pub fn with_application_transactions(mut self, txn: Vec<Txn>) -> Self {
-        self.app_transaction = txn;
         self
     }
 }
@@ -378,8 +370,7 @@ impl From<CommitProperties> for CommitBuilder {
             app_transaction: value.app_transaction,
             post_commit_hook: PostCommitHookProperties {
                 create_checkpoint: value.create_checkpoint,
-            }
-            .into(),
+            }.into(),
             ..Default::default()
         }
     }
@@ -471,6 +462,7 @@ impl<'a> std::future::IntoFuture for PreCommit<'a> {
         let this = self;
 
         Box::pin(async move { this.into_prepared_commit_future().await?.await?.await })
+        // Box::pin(async move { this.into_prepared_commit_future().await?.await })
     }
 }
 
@@ -485,7 +477,7 @@ impl<'a> PreCommit<'a> {
             }
 
             // Serialize all actions that are part of this log entry.
-            let log_entry = this.data.get_bytes()?;
+            let log_entry = this.data.get_bytes2()?;
 
             // Write delta log entry as temporary file to storage. For the actual commit,
             // the temporary file is moved (atomic rename) to the delta log folder within `commit` function.
@@ -527,7 +519,7 @@ impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
     type Output = DeltaResult<PostCommit<'a>>;
     type IntoFuture = BoxFuture<'a, Self::Output>;
 
-    fn into_future(self) -> Self::IntoFuture {
+    fn into_future(self) -> BoxFuture<'a, Self::Output> {
         let this = self;
 
         Box::pin(async move {
@@ -541,7 +533,7 @@ impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
                     create_checkpoint: false,
                     log_store: this.log_store,
                     table_data: this.table_data,
-                });
+                })
             }
 
             // unwrap() is safe here due to the above check
@@ -562,7 +554,7 @@ impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
                                 .unwrap_or_default(),
                             log_store: this.log_store,
                             table_data: this.table_data,
-                        });
+                        })
                     }
                     Err(TransactionError::VersionAlreadyExists(version)) => {
                         let summary = WinningCommitSummary::try_new(
@@ -570,7 +562,7 @@ impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
                             version - 1,
                             version,
                         )
-                        .await?;
+                            .await?;
                         let transaction_info = TransactionInfo::try_new(
                             read_snapshot,
                             this.data.operation.read_predicate(),
@@ -626,18 +618,21 @@ impl<'a> PostCommit<'a> {
     async fn run_post_commit_hook(&self) -> DeltaResult<DeltaTableState> {
         if let Some(table) = self.table_data {
             let mut snapshot = table.eager_snapshot().clone();
+            let mut app_visitor = AppTransactionVisitor::new();
+
             if self.version - snapshot.version() > 1 {
                 // This may only occur during concurrent write actions. We need to update the state first to - 1
                 // then we can advance.
                 snapshot
-                    .update(self.log_store.clone(), Some(self.version - 1))
+                    .update(self.log_store.clone(), Some(self.version - 1), vec![&mut app_visitor])
                     .await?;
-                snapshot.advance(vec![&self.data])?;
+                snapshot.advance(vec![&self.data], vec![&mut app_visitor])?;
             } else {
-                snapshot.advance(vec![&self.data])?;
+                snapshot.advance(vec![&self.data], vec![&mut app_visitor])?;
             }
+
             let state = DeltaTableState {
-                app_transaction_version: HashMap::new(),
+                app_transaction_version: app_visitor.app_transaction_version,
                 snapshot,
             };
             // Execute each hook
@@ -653,7 +648,7 @@ impl<'a> PostCommit<'a> {
                 Default::default(),
                 Some(self.version),
             )
-            .await?;
+                .await?;
             Ok(state)
         }
     }

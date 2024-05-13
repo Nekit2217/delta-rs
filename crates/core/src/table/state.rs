@@ -25,7 +25,7 @@ use crate::protocol::DeltaOperation;
 use crate::{DeltaResult, DeltaTableError};
 
 pub(crate) struct AppTransactionVisitor {
-    app_transaction_version: HashMap<String, i64>,
+    pub(crate) app_transaction_version: HashMap<String, i64>,
 }
 
 impl AppTransactionVisitor {

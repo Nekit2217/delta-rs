@@ -716,7 +716,7 @@ mod tests {
             )
             .await?;
             let batches = snapshot
-                .files(store.clone())?
+                .files(store.clone(), vec![])?
                 .try_collect::<Vec<_>>()
                 .await?;
             let num_files = batches.iter().map(|b| b.num_rows() as i64).sum::<i64>();
