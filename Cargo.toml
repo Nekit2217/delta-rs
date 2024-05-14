@@ -27,29 +27,29 @@ debug = "line-tables-only"
 
 [workspace.dependencies]
 # arrow
-arrow = { version = "51" }
-arrow-arith = { version = "51" }
-arrow-array = { version = "51", features = ["chrono-tz"] }
-arrow-buffer = { version = "51" }
-arrow-cast = { version = "51" }
-arrow-ipc = { version = "51" }
-arrow-json = { version = "51" }
-arrow-ord = { version = "51" }
-arrow-row = { version = "51" }
-arrow-schema = { version = "51" }
-arrow-select = { version = "51" }
+arrow = { path = "../arrow-rs/arrow" }
+arrow-arith = { path = "../arrow-rs/arrow-arith" }
+arrow-array = { path = "../arrow-rs/arrow-array", features = ["chrono-tz"]}
+arrow-buffer = { path = "../arrow-rs/arrow-buffer" }
+arrow-cast = { path = "../arrow-rs/arrow-cast" }
+arrow-ipc = { path = "../arrow-rs/arrow-ipc" }
+arrow-json = { path = "../arrow-rs/arrow-json" }
+arrow-ord = { path = "../arrow-rs/arrow-ord" }
+arrow-row = { path = "../arrow-rs/arrow-row" }
+arrow-schema = { path = "../arrow-rs/arrow-schema" }
+arrow-select = { path = "../arrow-rs/arrow-select" }
 object_store = { version = "0.9" }
-parquet = { version = "51" }
+parquet = { path = "../arrow-rs/parquet" }
 
 # datafusion
-datafusion = { version = "37.1" }
-datafusion-expr = { version = "37.1" }
-datafusion-common = { version = "37.1" }
-datafusion-proto = { version = "37.1" }
-datafusion-sql = { version = "37.1" }
-datafusion-physical-expr = { version = "37.1" }
-datafusion-functions = { version = "37.1" }
-datafusion-functions-array = { version = "37.1" }
+datafusion = { path = "../arrow-datafusion/datafusion/core" }
+datafusion-expr = { path = "../arrow-datafusion/datafusion/expr" }
+datafusion-common = { path = "../arrow-datafusion/datafusion/common" }
+datafusion-proto = { path = "../arrow-datafusion/datafusion/proto" }
+datafusion-sql = { path = "../arrow-datafusion/datafusion/sql" }
+datafusion-physical-expr = { path = "../arrow-datafusion/datafusion/physical-expr" }
+datafusion-functions = { path = "../arrow-datafusion/datafusion/functions" }
+datafusion-functions-array = { path = "../arrow-datafusion/datafusion/functions-array" }
 
 # serde
 serde = { version = "1.0.194", features = ["derive"] }
