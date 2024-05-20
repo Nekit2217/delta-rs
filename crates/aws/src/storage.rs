@@ -296,6 +296,7 @@ pub struct S3StorageBackend {
     allow_unsafe_rename: bool,
     url: Url,
     options: StorageOptions,
+    is_retry: bool,
 }
 
 impl std::fmt::Display for S3StorageBackend {
@@ -319,7 +320,12 @@ impl S3StorageBackend {
             allow_unsafe_rename,
             url,
             options,
+            is_retry: false,
         })
+    }
+
+    pub fn set_is_retry(&mut self, is_it: bool) {
+        self.is_retry = is_it;
     }
 
     pub fn tmp_client(&self) -> DeltaResult<ObjectStoreRef> {
@@ -342,13 +348,15 @@ impl S3StorageBackend {
         } else {
             let s3_options = S3StorageOptions::from_map(&self.options.0)?;
 
-            let store = S3StorageBackend::try_new(
+            let mut store = S3StorageBackend::try_new(
                 store,
                 Some("dynamodb") == s3_options.locking_provider.as_deref()
                     || s3_options.allow_unsafe_rename,
                 self.url.clone(),
                 self.options.clone(),
             )?;
+
+            store.set_is_retry(true);
 
             return Ok(Arc::from(store));
         }
@@ -370,7 +378,7 @@ impl ObjectStore for S3StorageBackend {
             Err(e) => {
                 match e {
                     ObjectStoreError::Generic { store, source } => {
-                        if !format!("{:?}", source).contains("hyper::Error(Canceled, \"connection closed\"))") {
+                        if self.is_retry {
                             return Err(ObjectStoreError::Generic { store, source })
                         }
                     },
@@ -398,7 +406,7 @@ impl ObjectStore for S3StorageBackend {
             Err(e) => {
                 match e {
                     ObjectStoreError::Generic { store, source } => {
-                        if !format!("{:?}", source).contains("hyper::Error(Canceled, \"connection closed\"))") {
+                        if self.is_retry {
                             return Err(ObjectStoreError::Generic { store, source })
                         }
                     },
@@ -421,7 +429,7 @@ impl ObjectStore for S3StorageBackend {
             Err(e) => {
                 match e {
                     ObjectStoreError::Generic { store, source } => {
-                        if !format!("{:?}", source).contains("hyper::Error(Canceled, \"connection closed\"))") {
+                        if self.is_retry {
                             return Err(ObjectStoreError::Generic { store, source })
                         }
                     },
@@ -454,7 +462,7 @@ impl ObjectStore for S3StorageBackend {
             Err(e) => {
                 match e {
                     ObjectStoreError::Generic { store, source } => {
-                        if !format!("{:?}", source).contains("hyper::Error(Canceled, \"connection closed\"))") {
+                        if self.is_retry {
                             return Err(ObjectStoreError::Generic { store, source })
                         }
                     },
@@ -477,7 +485,7 @@ impl ObjectStore for S3StorageBackend {
             Err(e) => {
                 match e {
                     ObjectStoreError::Generic { store, source } => {
-                        if !format!("{:?}", source).contains("hyper::Error(Canceled, \"connection closed\"))") {
+                        if self.is_retry {
                             return Err(ObjectStoreError::Generic { store, source })
                         }
                     },
@@ -500,7 +508,7 @@ impl ObjectStore for S3StorageBackend {
             Err(e) => {
                 match e {
                     ObjectStoreError::Generic { store, source } => {
-                        if !format!("{:?}", source).contains("hyper::Error(Canceled, \"connection closed\"))") {
+                        if self.is_retry {
                             return Err(ObjectStoreError::Generic { store, source })
                         }
                     },
@@ -523,7 +531,7 @@ impl ObjectStore for S3StorageBackend {
             Err(e) => {
                 match e {
                     ObjectStoreError::Generic { store, source } => {
-                        if !format!("{:?}", source).contains("hyper::Error(Canceled, \"connection closed\"))") {
+                        if self.is_retry {
                             return Err(ObjectStoreError::Generic { store, source })
                         }
                     },
@@ -532,7 +540,7 @@ impl ObjectStore for S3StorageBackend {
             }
         }
 
-                match self.tmp_client() {
+        match self.tmp_client() {
             Ok(v) => v.delete(location).await,
             Err(e) => {
                 panic!("{}", format!("Cannot reconnect on put function delete: {:?}", e))
@@ -558,7 +566,7 @@ impl ObjectStore for S3StorageBackend {
             Err(e) => {
                 match e {
                     ObjectStoreError::Generic { store, source } => {
-                        if !format!("{:?}", source).contains("hyper::Error(Canceled, \"connection closed\"))") {
+                        if self.is_retry {
                             return Err(ObjectStoreError::Generic { store, source })
                         }
                     },
@@ -581,7 +589,7 @@ impl ObjectStore for S3StorageBackend {
             Err(e) => {
                 match e {
                     ObjectStoreError::Generic { store, source } => {
-                        if !format!("{:?}", source).contains("hyper::Error(Canceled, \"connection closed\"))") {
+                        if self.is_retry {
                             return Err(ObjectStoreError::Generic { store, source })
                         }
                     },
@@ -622,7 +630,7 @@ impl ObjectStore for S3StorageBackend {
             Err(e) => {
                 match e {
                     ObjectStoreError::Generic { store, source } => {
-                        if !format!("{:?}", source).contains("hyper::Error(Canceled, \"connection closed\"))") {
+                        if self.is_retry {
                             return Err(ObjectStoreError::Generic { store, source })
                         }
                     },
