@@ -818,6 +818,10 @@ impl DisplayAs for DeltaScan {
 }
 
 impl ExecutionPlan for DeltaScan {
+    fn name(&self) -> &str {
+        "delta_scan"
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

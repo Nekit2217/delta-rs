@@ -249,6 +249,10 @@ impl ExecutionPlan for CDCObserver {
     fn metrics(&self) -> Option<MetricsSet> {
         self.parent.metrics()
     }
+
+    fn name(&self) -> &str {
+        "cdc"
+    }
 }
 
 /// The CDCObserverStream simply acts to help observe the stream of data being
