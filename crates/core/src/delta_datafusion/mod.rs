@@ -57,10 +57,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::scalar::ScalarValue;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
-use datafusion_common::{
-    config::ConfigOptions, Column, DFSchema, DataFusionError, Result as DataFusionResult,
-    ToDFSchema,
-};
+use datafusion_common::{config::ConfigOptions, Column, DFSchema, DataFusionError, Result as DataFusionResult, ToDFSchema, TableReference};
 use datafusion_expr::logical_plan::CreateExternalTable;
 use datafusion_expr::utils::conjunction;
 use datafusion_expr::{col, Expr, Extension, LogicalPlan, TableProviderFilterPushDown, Volatility};
@@ -1286,6 +1283,7 @@ impl LogicalExtensionCodec for DeltaLogicalCodec {
     fn try_decode_table_provider(
         &self,
         buf: &[u8],
+        _table_ref: &datafusion_common::TableReference,
         _schema: SchemaRef,
         _ctx: &SessionContext,
     ) -> Result<Arc<dyn TableProvider>, DataFusionError> {
@@ -1296,6 +1294,7 @@ impl LogicalExtensionCodec for DeltaLogicalCodec {
 
     fn try_encode_table_provider(
         &self,
+        _table_ref: &datafusion_common::TableReference,
         node: Arc<dyn TableProvider>,
         buf: &mut Vec<u8>,
     ) -> Result<(), DataFusionError> {
