@@ -432,7 +432,7 @@ pub struct DeletionVectorDescriptor {
     pub offset: Option<i32>,
 
     /// Size of the serialized DV in bytes (raw data size, i.e. before base85 encoding, if inline).
-    pub size_in_bytes: i32,
+    pub size_in_bytes: i64,
 
     /// Number of rows the given DV logically removes from the file.
     pub cardinality: i64,

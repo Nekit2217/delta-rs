@@ -329,7 +329,7 @@ impl DeltaTableState {
         let mut storage_type = arrow::array::StringBuilder::with_capacity(capacity, 1);
         let mut path_or_inline_div = arrow::array::StringBuilder::with_capacity(capacity, 64);
         let mut offset = arrow::array::Int32Builder::with_capacity(capacity);
-        let mut size_in_bytes = arrow::array::Int32Builder::with_capacity(capacity);
+        let mut size_in_bytes = arrow::array::Int64Builder::with_capacity(capacity);
         let mut cardinality = arrow::array::Int64Builder::with_capacity(capacity);
 
         for add in files {

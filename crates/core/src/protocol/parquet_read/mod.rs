@@ -81,7 +81,7 @@ impl DeletionVectorDescriptor {
                 "sizeInBytes" => {
                     re.size_in_bytes = record.get_int(i).map_err(|_| {
                         gen_action_type_error("add", "deletionVector.sizeInBytes", "int")
-                    })?;
+                    })? as i64;
                 }
                 "cardinality" => {
                     re.cardinality = record.get_long(i).map_err(|_| {

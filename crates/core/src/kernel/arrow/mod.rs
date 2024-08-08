@@ -219,7 +219,7 @@ pub(crate) fn delta_log_schema_for_table(
             deletionVector[
                 storageType:Utf8 not_null,
                 pathOrInlineDv:Utf8 not_null,
-                offset:Int64 null,
+                offset:Int32 null,
                 sizeInBytes:Int64 not_null,
                 cardinality:Int64 not_null
             ]

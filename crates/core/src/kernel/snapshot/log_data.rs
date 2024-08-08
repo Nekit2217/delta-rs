@@ -66,7 +66,7 @@ impl<T: PartitionsExt> PartitionsExt for Arc<T> {
 pub struct DeletionVector<'a> {
     storage_type: &'a StringArray,
     path_or_inline_dv: &'a StringArray,
-    size_in_bytes: &'a Int32Array,
+    size_in_bytes: &'a Int64Array,
     cardinality: &'a Int64Array,
     offset: Option<&'a Int32Array>,
 }
@@ -109,7 +109,7 @@ impl<'a> DeletionVectorView<'a> {
     fn path_or_inline_dv(&self) -> &str {
         self.data.path_or_inline_dv.value(self.index)
     }
-    fn size_in_bytes(&self) -> i32 {
+    fn size_in_bytes(&self) -> i64 {
         self.data.size_in_bytes.value(self.index)
     }
     fn cardinality(&self) -> i64 {
@@ -369,7 +369,7 @@ impl<'a> FileStatsAccessor<'a> {
         let deletion_vector = deletion_vector.and_then(|dv| {
             let storage_type = extract_and_cast::<StringArray>(dv, "storageType").ok()?;
             let path_or_inline_dv = extract_and_cast::<StringArray>(dv, "pathOrInlineDv").ok()?;
-            let size_in_bytes = extract_and_cast::<Int32Array>(dv, "sizeInBytes").ok()?;
+            let size_in_bytes = extract_and_cast::<Int64Array>(dv, "sizeInBytes").ok()?;
             let cardinality = extract_and_cast::<Int64Array>(dv, "cardinality").ok()?;
             let offset = extract_and_cast_opt::<Int32Array>(dv, "offset");
             Some(DeletionVector {
