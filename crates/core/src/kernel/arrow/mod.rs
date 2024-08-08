@@ -213,14 +213,14 @@ pub(crate) fn delta_log_schema_for_table(
             size:Int64,
             modificationTime:Int64,
             dataChange:Boolean,
-            stats:LargeUtf8,
+            stats:Utf8,
             partitionValues,
             tags,
             deletionVector[
                 storageType:Utf8 not_null,
                 pathOrInlineDv:Utf8 not_null,
                 offset:Int32 null,
-                sizeInBytes:Int32 not_null,
+                sizeInBytes:Int64 not_null,
                 cardinality:Int64 not_null
             ]
         ];
