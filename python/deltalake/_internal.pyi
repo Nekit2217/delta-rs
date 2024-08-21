@@ -1,10 +1,4 @@
-import sys
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
-
-if sys.version_info >= (3, 8):
-    from typing import Literal
-else:
-    from typing_extensions import Literal
+from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple, Union
 
 import pyarrow
 import pyarrow.fs as fs
@@ -40,8 +34,13 @@ class RawDeltaTable:
         data_catalog_id: Optional[str] = None,
         catalog_options: Optional[Dict[str, str]] = None,
     ) -> str: ...
+    @staticmethod
+    def is_deltatable(
+        table_uri: str, storage_options: Optional[Dict[str, str]]
+    ) -> bool: ...
     def table_uri(self) -> str: ...
     def version(self) -> int: ...
+    def get_add_file_sizes(self) -> Dict[str, int]: ...
     def get_latest_version(self) -> int: ...
     def get_num_index_cols(self) -> int: ...
     def get_stats_columns(self) -> Optional[List[str]]: ...
@@ -60,6 +59,7 @@ class RawDeltaTable:
         retention_hours: Optional[int],
         enforce_retention_duration: bool,
         custom_metadata: Optional[Dict[str, str]],
+        post_commithook_properties: Optional[Dict[str, Optional[bool]]],
     ) -> List[str]: ...
     def compact_optimize(
         self,
@@ -69,6 +69,7 @@ class RawDeltaTable:
         min_commit_interval: Optional[int],
         writer_properties: Optional[Dict[str, Optional[str]]],
         custom_metadata: Optional[Dict[str, str]],
+        post_commithook_properties: Optional[Dict[str, Optional[bool]]],
     ) -> str: ...
     def z_order_optimize(
         self,
@@ -80,17 +81,26 @@ class RawDeltaTable:
         min_commit_interval: Optional[int],
         writer_properties: Optional[Dict[str, Optional[str]]],
         custom_metadata: Optional[Dict[str, str]],
+        post_commithook_properties: Optional[Dict[str, Optional[bool]]],
     ) -> str: ...
+    def add_columns(
+        self,
+        fields: List[Field],
+        custom_metadata: Optional[Dict[str, str]],
+        post_commithook_properties: Optional[Dict[str, Optional[bool]]],
+    ) -> None: ...
     def add_constraints(
         self,
         constraints: Dict[str, str],
         custom_metadata: Optional[Dict[str, str]],
+        post_commithook_properties: Optional[Dict[str, Optional[bool]]],
     ) -> None: ...
     def drop_constraints(
         self,
         name: str,
         raise_if_not_exists: bool,
         custom_metadata: Optional[Dict[str, str]],
+        post_commithook_properties: Optional[Dict[str, Optional[bool]]],
     ) -> None: ...
     def set_table_properties(
         self,
@@ -117,9 +127,13 @@ class RawDeltaTable:
         predicate: Optional[str],
         writer_properties: Optional[Dict[str, Optional[str]]],
         custom_metadata: Optional[Dict[str, str]],
+        post_commithook_properties: Optional[Dict[str, Optional[bool]]],
     ) -> str: ...
     def repair(
-        self, dry_run: bool, custom_metadata: Optional[Dict[str, str]]
+        self,
+        dry_run: bool,
+        custom_metadata: Optional[Dict[str, str]],
+        post_commithook_properties: Optional[Dict[str, Optional[bool]]],
     ) -> str: ...
     def update(
         self,
@@ -128,6 +142,7 @@ class RawDeltaTable:
         writer_properties: Optional[Dict[str, Optional[str]]],
         safe_cast: bool,
         custom_metadata: Optional[Dict[str, str]],
+        post_commithook_properties: Optional[Dict[str, Optional[bool]]],
     ) -> str: ...
     def merge_execute(
         self,
@@ -137,6 +152,7 @@ class RawDeltaTable:
         target_alias: Optional[str],
         writer_properties: Optional[Dict[str, Optional[str]]],
         custom_metadata: Optional[Dict[str, str]],
+        post_commithook_properties: Optional[Dict[str, Optional[bool]]],
         safe_cast: bool,
         matched_update_updates: Optional[List[Dict[str, str]]],
         matched_update_predicate: Optional[List[Optional[str]]],
@@ -160,11 +176,13 @@ class RawDeltaTable:
         schema: pyarrow.Schema,
         partitions_filters: Optional[FilterType],
         custom_metadata: Optional[Dict[str, str]],
+        post_commithook_properties: Optional[Dict[str, Optional[bool]]],
     ) -> None: ...
     def cleanup_metadata(self) -> None: ...
     def check_can_write_timestamp_ntz(self, schema: pyarrow.Schema) -> None: ...
     def load_cdf(
         self,
+        columns: Optional[List[str]] = None,
         starting_version: int = 0,
         ending_version: Optional[int] = None,
         starting_timestamp: Optional[str] = None,
@@ -198,6 +216,7 @@ def write_to_deltalake(
     storage_options: Optional[Dict[str, str]],
     writer_properties: Optional[Dict[str, Optional[str]]],
     custom_metadata: Optional[Dict[str, str]],
+    post_commithook_properties: Optional[Dict[str, Optional[bool]]],
 ) -> None: ...
 def convert_to_deltalake(
     uri: str,

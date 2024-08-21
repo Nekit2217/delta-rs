@@ -26,7 +26,8 @@ debug = true
 debug = "line-tables-only"
 
 [workspace.dependencies]
-#delta_kernel = { version = "0.1.1" }
+# delta_kernel = { path = "../delta-kernel-rs/kernel", version = "0.3.0" }
+#delta_kernel = { version = "0.3.0" }
 delta_kernel = { git="https://github.com/Nekit2217/delta-kernel-rs", branch="bm-main" }
 #delta_kernel = { path = "../delta-kernel-rs/kernel" }
 
@@ -67,7 +68,7 @@ datafusion-proto = { git="https://github.com/Nekit2217/arrow-datafusion", branch
 datafusion-sql = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
 datafusion-physical-expr = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
 datafusion-functions = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
-datafusion-functions-array = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
+datafusion-functions-aggregate = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
 #datafusion = { path = "../arrow-datafusion/datafusion/core" }
 #datafusion-expr = { path = "../arrow-datafusion/datafusion/expr" }
 #datafusion-common = { path = "../arrow-datafusion/datafusion/common" }
@@ -75,7 +76,7 @@ datafusion-functions-array = { git="https://github.com/Nekit2217/arrow-datafusio
 #datafusion-sql = { path = "../arrow-datafusion/datafusion/sql" }
 #datafusion-physical-expr = { path = "../arrow-datafusion/datafusion/physical-expr" }
 #datafusion-functions = { path = "../arrow-datafusion/datafusion/functions" }
-#datafusion-functions-array = { path = "../arrow-datafusion/datafusion/functions-array" }
+#datafusion-functions-aggregate = { path = "../arrow-datafusion/datafusion/functions-aggregate" }
 
 # serde
 serde = { version = "1.0.194", features = ["derive"] }
@@ -88,6 +89,7 @@ tracing = { version = "0.1", features = ["log"] }
 regex = { version = "1" }
 thiserror = { version = "1" }
 url = { version = "2" }
+urlencoding = "2.1.3"
 uuid = { version = "1" }
 
 # runtime / async

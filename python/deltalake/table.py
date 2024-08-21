@@ -22,7 +22,6 @@ from typing import (
 import pyarrow
 import pyarrow.dataset as ds
 import pyarrow.fs as pa_fs
-import pyarrow_hotfix  # noqa: F401; addresses CVE-2023-47248; # type: ignore
 from pyarrow.dataset import (
     Expression,
     FileSystemDataset,
@@ -39,17 +38,18 @@ except ImportError:
 if TYPE_CHECKING:
     import os
 
-from deltalake._internal import DeltaDataChecker as _DeltaDataChecker
 from deltalake._internal import RawDeltaTable
 from deltalake._internal import create_deltalake as _create_deltalake
 from deltalake._util import encode_partition_value
 from deltalake.data_catalog import DataCatalog
 from deltalake.exceptions import DeltaProtocolError
 from deltalake.fs import DeltaStorageHandler
+from deltalake.schema import ArrowSchemaConversionMode
+from deltalake.schema import Field as DeltaField
 from deltalake.schema import Schema as DeltaSchema
 
 try:
-    import pandas as pd  # noqa: F811
+    import pandas as pd
 except ModuleNotFoundError:
     _has_pandas = False
 else:
@@ -115,6 +115,28 @@ class Compression(Enum):
             )
         else:
             return True
+
+
+@dataclass(init=True)
+class PostCommitHookProperties:
+    """The post commit hook properties, only required for advanced usecases where you need to control this."""
+
+    def __init__(
+        self,
+        create_checkpoint: bool = True,
+        cleanup_expired_logs: Optional[bool] = None,
+    ):
+        """Checkpoints are by default created based on the delta.checkpointInterval config setting.
+        cleanup_expired_logs can be set to override the delta.enableExpiredLogCleanup, otherwise the
+        config setting will be used to decide whether to clean up logs automatically by taking also
+        the delta.logRetentionDuration into account.
+
+        Args:
+            create_checkpoint (bool, optional): to create checkpoints based on checkpoint interval. Defaults to True.
+            cleanup_expired_logs (Optional[bool], optional): to clean up logs based on interval. Defaults to None.
+        """
+        self.create_checkpoint = create_checkpoint
+        self.cleanup_expired_logs = cleanup_expired_logs
 
 
 @dataclass(init=True)
@@ -336,6 +358,21 @@ class DeltaTable:
         return cls(
             table_uri=table_uri, version=version, log_buffer_size=log_buffer_size
         )
+
+    @staticmethod
+    def is_deltatable(
+        table_uri: str, storage_options: Optional[Dict[str, str]] = None
+    ) -> bool:
+        """
+        Returns True if a Delta Table exists at specified path.
+        Returns False otherwise.
+
+        Args:
+            table_uri: the path of the DeltaTable
+            storage_options: a dictionary of the options to use for the
+                storage backend
+        """
+        return RawDeltaTable.is_deltatable(table_uri, storage_options)
 
     @classmethod
     def create(
@@ -585,9 +622,14 @@ class DeltaTable:
         ending_version: Optional[int] = None,
         starting_timestamp: Optional[str] = None,
         ending_timestamp: Optional[str] = None,
+        columns: Optional[List[str]] = None,
     ) -> pyarrow.RecordBatchReader:
         return self._table.load_cdf(
-            starting_version, ending_version, starting_timestamp, ending_timestamp
+            columns=columns,
+            starting_version=starting_version,
+            ending_version=ending_version,
+            starting_timestamp=starting_timestamp,
+            ending_timestamp=ending_timestamp,
         )
 
     @property
@@ -664,15 +706,17 @@ class DeltaTable:
         dry_run: bool = True,
         enforce_retention_duration: bool = True,
         custom_metadata: Optional[Dict[str, str]] = None,
+        post_commithook_properties: Optional[PostCommitHookProperties] = None,
     ) -> List[str]:
         """
         Run the Vacuum command on the Delta Table: list and delete files no longer referenced by the Delta table and are older than the retention threshold.
 
         Args:
-            retention_hours: the retention threshold in hours, if none then the value from `configuration.deletedFileRetentionDuration` is used or default of 1 week otherwise.
+            retention_hours: the retention threshold in hours, if none then the value from `delta.deletedFileRetentionDuration` is used or default of 1 week otherwise.
             dry_run: when activated, list only the files, delete otherwise
-            enforce_retention_duration: when disabled, accepts retention hours smaller than the value from `configuration.deletedFileRetentionDuration`.
+            enforce_retention_duration: when disabled, accepts retention hours smaller than the value from `delta.deletedFileRetentionDuration`.
             custom_metadata: custom metadata that will be added to the transaction commit.
+            post_commithook_properties: properties for the post commit hook. If None, default values are used.
         Returns:
             the list of files no longer referenced by the Delta Table and are older than the retention threshold.
         """
@@ -685,6 +729,7 @@ class DeltaTable:
             retention_hours,
             enforce_retention_duration,
             custom_metadata,
+            post_commithook_properties.__dict__ if post_commithook_properties else None,
         )
 
     def update(
@@ -697,6 +742,7 @@ class DeltaTable:
         writer_properties: Optional[WriterProperties] = None,
         error_on_type_mismatch: bool = True,
         custom_metadata: Optional[Dict[str, str]] = None,
+        post_commithook_properties: Optional[PostCommitHookProperties] = None,
     ) -> Dict[str, Any]:
         """`UPDATE` records in the Delta Table that matches an optional predicate. Either updates or new_values needs
         to be passed for it to execute.
@@ -708,6 +754,7 @@ class DeltaTable:
             writer_properties: Pass writer properties to the Rust parquet writer.
             error_on_type_mismatch: specify if update will return error if data types are mismatching :default = True
             custom_metadata: custom metadata that will be added to the transaction commit.
+            post_commithook_properties: properties for the post commit hook. If None, default values are used.
         Returns:
             the metrics from update
 
@@ -786,6 +833,9 @@ class DeltaTable:
             writer_properties._to_dict() if writer_properties else None,
             safe_cast=not error_on_type_mismatch,
             custom_metadata=custom_metadata,
+            post_commithook_properties=post_commithook_properties.__dict__
+            if post_commithook_properties
+            else None,
         )
         return json.loads(metrics)
 
@@ -825,8 +875,9 @@ class DeltaTable:
         target_alias: Optional[str] = None,
         error_on_type_mismatch: bool = True,
         writer_properties: Optional[WriterProperties] = None,
-        large_dtypes: bool = True,
+        large_dtypes: Optional[bool] = None,
         custom_metadata: Optional[Dict[str, str]] = None,
+        post_commithook_properties: Optional[PostCommitHookProperties] = None,
     ) -> "TableMerger":
         """Pass the source data which you want to merge on the target delta table, providing a
         predicate in SQL query like format. You can also specify on what to do when the underlying data types do not
@@ -839,14 +890,21 @@ class DeltaTable:
             target_alias: Alias for the target table
             error_on_type_mismatch: specify if merge will return error if data types are mismatching :default = True
             writer_properties: Pass writer properties to the Rust parquet writer
-            large_dtypes: If True, the data schema is kept in large_dtypes.
+            large_dtypes: Deprecated, will be removed in 1.0
+            arrow_schema_conversion_mode: Large converts all types of data schema into Large Arrow types, passthrough keeps string/binary/list types untouched
             custom_metadata: custom metadata that will be added to the transaction commit.
+            post_commithook_properties: properties for the post commit hook. If None, default values are used.
 
         Returns:
             TableMerger: TableMerger Object
         """
-        invariants = self.schema().invariants
-        checker = _DeltaDataChecker(invariants)
+        if large_dtypes:
+            warnings.warn(
+                "large_dtypes is deprecated",
+                category=DeprecationWarning,
+                stacklevel=2,
+            )
+        conversion_mode = ArrowSchemaConversionMode.PASSTHROUGH
 
         from .schema import (
             convert_pyarrow_dataset,
@@ -856,28 +914,24 @@ class DeltaTable:
         )
 
         if isinstance(source, pyarrow.RecordBatchReader):
-            source = convert_pyarrow_recordbatchreader(source, large_dtypes)
+            source = convert_pyarrow_recordbatchreader(source, conversion_mode)
         elif isinstance(source, pyarrow.RecordBatch):
-            source = convert_pyarrow_recordbatch(source, large_dtypes)
+            source = convert_pyarrow_recordbatch(source, conversion_mode)
         elif isinstance(source, pyarrow.Table):
-            source = convert_pyarrow_table(source, large_dtypes)
+            source = convert_pyarrow_table(source, conversion_mode)
         elif isinstance(source, ds.Dataset):
-            source = convert_pyarrow_dataset(source, large_dtypes)
+            source = convert_pyarrow_dataset(source, conversion_mode)
         elif _has_pandas and isinstance(source, pd.DataFrame):
             source = convert_pyarrow_table(
-                pyarrow.Table.from_pandas(source), large_dtypes
+                pyarrow.Table.from_pandas(source), conversion_mode
             )
         else:
             raise TypeError(
                 f"{type(source).__name__} is not a valid input. Only PyArrow RecordBatchReader, RecordBatch, Table or Pandas DataFrame are valid inputs for source."
             )
 
-        def validate_batch(batch: pyarrow.RecordBatch) -> pyarrow.RecordBatch:
-            checker.check_batch(batch)
-            return batch
-
         source = pyarrow.RecordBatchReader.from_batches(
-            source.schema, (validate_batch(batch) for batch in source)
+            source.schema, (batch for batch in source)
         )
 
         return TableMerger(
@@ -889,6 +943,7 @@ class DeltaTable:
             safe_cast=not error_on_type_mismatch,
             writer_properties=writer_properties,
             custom_metadata=custom_metadata,
+            post_commithook_properties=post_commithook_properties,
         )
 
     def restore(
@@ -992,15 +1047,11 @@ class DeltaTable:
                 )
 
         if not filesystem:
-            file_sizes = self.get_add_actions().to_pydict()
-            file_sizes = {
-                x: y for x, y in zip(file_sizes["path"], file_sizes["size_bytes"])
-            }
             filesystem = pa_fs.PyFileSystem(
                 DeltaStorageHandler.from_table(
                     self._table,
                     self._storage_options,
-                    file_sizes,
+                    self._table.get_add_file_sizes(),
                 )
             )
         format = ParquetFileFormat(
@@ -1090,7 +1141,7 @@ class DeltaTable:
     def cleanup_metadata(self) -> None:
         """
         Delete expired log files before current version from table. The table log retention is based on
-        the `configuration.logRetentionDuration` value, 30 days by default.
+        the `delta.logRetentionDuration` value, 30 days by default.
         """
         self._table.cleanup_metadata()
 
@@ -1155,6 +1206,7 @@ class DeltaTable:
         predicate: Optional[str] = None,
         writer_properties: Optional[WriterProperties] = None,
         custom_metadata: Optional[Dict[str, str]] = None,
+        post_commithook_properties: Optional[PostCommitHookProperties] = None,
     ) -> Dict[str, Any]:
         """Delete records from a Delta Table that statisfy a predicate.
 
@@ -1167,6 +1219,7 @@ class DeltaTable:
             predicate: a SQL where clause. If not passed, will delete all rows.
             writer_properties: Pass writer properties to the Rust parquet writer.
             custom_metadata: custom metadata that will be added to the transaction commit.
+            post_commithook_properties: properties for the post commit hook. If None, default values are used.
 
         Returns:
             the metrics from delete.
@@ -1175,11 +1228,15 @@ class DeltaTable:
             predicate,
             writer_properties._to_dict() if writer_properties else None,
             custom_metadata,
+            post_commithook_properties.__dict__ if post_commithook_properties else None,
         )
         return json.loads(metrics)
 
     def repair(
-        self, dry_run: bool = False, custom_metadata: Optional[Dict[str, str]] = None
+        self,
+        dry_run: bool = False,
+        custom_metadata: Optional[Dict[str, str]] = None,
+        post_commithook_properties: Optional[PostCommitHookProperties] = None,
     ) -> Dict[str, Any]:
         """Repair the Delta Table by auditing active files that do not exist in the underlying
         filesystem and removes them. This can be useful when there are accidental deletions or corrupted files.
@@ -1191,6 +1248,8 @@ class DeltaTable:
         Args:
             dry_run: when activated, list only the files, otherwise add remove actions to transaction log. Defaults to False.
             custom_metadata: custom metadata that will be added to the transaction commit.
+            post_commithook_properties: properties for the post commit hook. If None, default values are used.
+
         Returns:
             The metrics from repair (FSCK) action.
 
@@ -1205,7 +1264,11 @@ class DeltaTable:
             {'dry_run': False, 'files_removed': ['6-0d084325-6885-4847-b008-82c1cf30674c-0.parquet', 5-4fba1d3e-3e20-4de1-933d-a8e13ac59f53-0.parquet']}
             ```
         """
-        metrics = self._table.repair(dry_run, custom_metadata)
+        metrics = self._table.repair(
+            dry_run,
+            custom_metadata,
+            post_commithook_properties.__dict__ if post_commithook_properties else None,
+        )
         return json.loads(metrics)
 
 
@@ -1222,6 +1285,7 @@ class TableMerger:
         safe_cast: bool = True,
         writer_properties: Optional[WriterProperties] = None,
         custom_metadata: Optional[Dict[str, str]] = None,
+        post_commithook_properties: Optional[PostCommitHookProperties] = None,
     ):
         self.table = table
         self.source = source
@@ -1231,6 +1295,7 @@ class TableMerger:
         self.safe_cast = safe_cast
         self.writer_properties = writer_properties
         self.custom_metadata = custom_metadata
+        self.post_commithook_properties = post_commithook_properties
         self.matched_update_updates: Optional[List[Dict[str, str]]] = None
         self.matched_update_predicate: Optional[List[Optional[str]]] = None
         self.matched_delete_predicate: Optional[List[str]] = None
@@ -1709,6 +1774,9 @@ class TableMerger:
             if self.writer_properties
             else None,
             custom_metadata=self.custom_metadata,
+            post_commithook_properties=self.post_commithook_properties.__dict__
+            if self.post_commithook_properties
+            else None,
             matched_update_updates=self.matched_update_updates,
             matched_update_predicate=self.matched_update_predicate,
             matched_delete_predicate=self.matched_delete_predicate,
@@ -1730,10 +1798,47 @@ class TableAlterer:
     def __init__(self, table: DeltaTable) -> None:
         self.table = table
 
+    def add_columns(
+        self,
+        fields: Union[DeltaField, List[DeltaField]],
+        custom_metadata: Optional[Dict[str, str]] = None,
+        post_commithook_properties: Optional[PostCommitHookProperties] = None,
+    ) -> None:
+        """Add new columns and/or update the fields of a stuctcolumn
+
+        Args:
+            fields: fields to merge into schema
+            custom_metadata: custom metadata that will be added to the transaction commit.
+            post_commithook_properties: properties for the post commit hook. If None, default values are used.
+
+        Example:
+            ```python
+            from deltalake import DeltaTable
+            from deltalake.schema import Field, PrimitiveType, StructType
+            dt = DeltaTable("test_table")
+            new_fields = [
+                Field("baz", StructType([Field("bar", PrimitiveType("integer"))])),
+                Field("bar", PrimitiveType("integer"))
+            ]
+            dt.alter.add_columns(
+                new_fields
+            )
+            ```
+        """
+        if isinstance(fields, DeltaField):
+            fields = [fields]
+
+        self.table._table.add_columns(
+            fields,
+            custom_metadata,
+            post_commithook_properties.__dict__ if post_commithook_properties else None,
+        )
+
     def add_constraint(
         self,
         constraints: Dict[str, str],
         custom_metadata: Optional[Dict[str, str]] = None,
+        post_commithook_properties: Optional[PostCommitHookProperties] = None,
     ) -> None:
         """
         Add constraints to the table. Limited to `single constraint` at once.
@@ -1741,6 +1846,8 @@ class TableAlterer:
         Args:
             constraints: mapping of constraint name to SQL-expression to evaluate on write
             custom_metadata: custom metadata that will be added to the transaction commit.
+            post_commithook_properties: properties for the post commit hook. If None, default values are used.
+
         Example:
             ```python
             from deltalake import DeltaTable
@@ -1762,13 +1869,18 @@ class TableAlterer:
                 Please execute add_constraints multiple times with each time a different constraint."""
             )
 
-        self.table._table.add_constraints(constraints, custom_metadata)
+        self.table._table.add_constraints(
+            constraints,
+            custom_metadata,
+            post_commithook_properties.__dict__ if post_commithook_properties else None,
+        )
 
     def drop_constraint(
         self,
         name: str,
         raise_if_not_exists: bool = True,
         custom_metadata: Optional[Dict[str, str]] = None,
+        post_commithook_properties: Optional[PostCommitHookProperties] = None,
     ) -> None:
         """
         Drop constraints from a table. Limited to `single constraint` at once.
@@ -1777,6 +1889,8 @@ class TableAlterer:
             name: constraint name which to drop.
             raise_if_not_exists: set if should raise if not exists.
             custom_metadata: custom metadata that will be added to the transaction commit.
+            post_commithook_properties: properties for the post commit hook. If None, default values are used.
+
         Example:
             ```python
             from deltalake import DeltaTable
@@ -1796,7 +1910,12 @@ class TableAlterer:
             {}
             ```
         """
-        self.table._table.drop_constraints(name, raise_if_not_exists, custom_metadata)
+        self.table._table.drop_constraints(
+            name,
+            raise_if_not_exists,
+            custom_metadata,
+            post_commithook_properties.__dict__ if post_commithook_properties else None,
+        )
 
     def set_table_properties(
         self,
@@ -1850,6 +1969,7 @@ class TableOptimizer:
         min_commit_interval: Optional[Union[int, timedelta]] = None,
         writer_properties: Optional[WriterProperties] = None,
         custom_metadata: Optional[Dict[str, str]] = None,
+        post_commithook_properties: Optional[PostCommitHookProperties] = None,
     ) -> Dict[str, Any]:
         """
         Compacts small files to reduce the total number of files in the table.
@@ -1873,6 +1993,7 @@ class TableOptimizer:
                                     want a commit per partition.
             writer_properties: Pass writer properties to the Rust parquet writer.
             custom_metadata: custom metadata that will be added to the transaction commit.
+            post_commithook_properties: properties for the post commit hook. If None, default values are used.
 
         Returns:
             the metrics from optimize
@@ -1903,6 +2024,7 @@ class TableOptimizer:
             min_commit_interval,
             writer_properties._to_dict() if writer_properties else None,
             custom_metadata,
+            post_commithook_properties.__dict__ if post_commithook_properties else None,
         )
         self.table.update_incremental()
         return json.loads(metrics)
@@ -1917,6 +2039,7 @@ class TableOptimizer:
         min_commit_interval: Optional[Union[int, timedelta]] = None,
         writer_properties: Optional[WriterProperties] = None,
         custom_metadata: Optional[Dict[str, str]] = None,
+        post_commithook_properties: Optional[PostCommitHookProperties] = None,
     ) -> Dict[str, Any]:
         """
         Reorders the data using a Z-order curve to improve data skipping.
@@ -1938,6 +2061,7 @@ class TableOptimizer:
                                     want a commit per partition.
             writer_properties: Pass writer properties to the Rust parquet writer.
             custom_metadata: custom metadata that will be added to the transaction commit.
+            post_commithook_properties: properties for the post commit hook. If None, default values are used.
 
         Returns:
             the metrics from optimize
@@ -1970,6 +2094,7 @@ class TableOptimizer:
             min_commit_interval,
             writer_properties._to_dict() if writer_properties else None,
             custom_metadata,
+            post_commithook_properties.__dict__ if post_commithook_properties else None,
         )
         self.table.update_incremental()
         return json.loads(metrics)

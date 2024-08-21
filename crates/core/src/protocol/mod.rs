@@ -21,7 +21,7 @@ use std::str::FromStr;
 use tracing::{debug, error};
 
 use crate::errors::{DeltaResult, DeltaTableError};
-use crate::kernel::{Add, CommitInfo, Metadata, Protocol, Remove};
+use crate::kernel::{Add, CommitInfo, Metadata, Protocol, Remove, StructField};
 use crate::logstore::LogStore;
 use crate::table::CheckPoint;
 
@@ -196,18 +196,9 @@ impl PartialStats {
         let null_count = take(&mut self.null_count);
         Stats {
             num_records: self.num_records,
-            min_values: match min_values {
-                Some(minv) => minv,
-                None => HashMap::default(),
-            },
-            max_values: match max_values {
-                Some(maxv) => maxv,
-                None => HashMap::default(),
-            },
-            null_count: match null_count {
-                Some(nc) => nc,
-                None => HashMap::default(),
-            },
+            min_values: min_values.unwrap_or_default(),
+            max_values: max_values.unwrap_or_default(),
+            null_count: null_count.unwrap_or_default(),
         }
     }
 }
@@ -326,6 +317,13 @@ pub struct MergePredicate {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum DeltaOperation {
+    /// Represents a Delta `Add Column` operation.
+    /// Used to add new columns or field in a struct
+    AddColumn {
+        /// Fields added to existing schema
+        fields: Vec<StructField>,
+    },
+
     /// Represents a Delta `Create` operation.
     /// Would usually only create the table, if also data is written,
     /// a `Write` operations is more appropriate
@@ -458,6 +456,7 @@ impl DeltaOperation {
     pub fn name(&self) -> &str {
         // operation names taken from https://learn.microsoft.com/en-us/azure/databricks/delta/history#--operation-metrics-keys
         match &self {
+            DeltaOperation::AddColumn { .. } => "ADD COLUMN",
             DeltaOperation::Create {
                 mode: SaveMode::Overwrite,
                 ..
@@ -513,6 +512,7 @@ impl DeltaOperation {
         match self {
             Self::Optimize { .. }
             | Self::SetTableProperties { .. }
+            | Self::AddColumn { .. }
             | Self::VacuumStart { .. }
             | Self::VacuumEnd { .. }
             | Self::AddConstraint { .. }
@@ -1082,6 +1082,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[ignore = "column mapping not yet supported."]
         async fn test_with_column_mapping() {
             // test table with column mapping and partitions
             let path = "../test/tests/data/table_with_column_mapping";

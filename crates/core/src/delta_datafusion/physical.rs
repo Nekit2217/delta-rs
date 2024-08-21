@@ -75,7 +75,7 @@ impl DisplayAs for MetricObserverExec {
 
 impl ExecutionPlan for MetricObserverExec {
     fn name(&self) -> &str {
-        "metric_observer"
+        Self::static_name()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -177,4 +177,8 @@ pub(crate) fn find_metric_node(
     }
 
     None
+}
+
+pub(crate) fn get_metric(metrics: &MetricsSet, name: &str) -> usize {
+    metrics.sum_by_name(name).map(|m| m.as_usize()).unwrap_or(0)
 }
