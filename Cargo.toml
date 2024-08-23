@@ -26,7 +26,7 @@ debug = true
 debug = "line-tables-only"
 
 [workspace.dependencies]
-delta_kernel = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-main" }
+delta_kernel = { git="https://github.com/Nekit2217/delta-kernel-rs", branch="bm-main" }
 # delta_kernel = { path = "../delta-kernel-rs/kernel" }
 # delta_kernel = { path = "../delta-kernel-rs/kernel", version = "0.3.0" }
 
