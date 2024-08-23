@@ -46,14 +46,14 @@ object_store = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master"
 parquet = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
 
 # datafusion
-datafusion = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-master" }
-datafusion-expr = { git="https://github.com/Nekit2217/arrow-datafusion" }
-datafusion-common = { git="https://github.com/Nekit2217/arrow-datafusion" }
-datafusion-proto = { git="https://github.com/Nekit2217/arrow-datafusion" }
-datafusion-sql = { git="https://github.com/Nekit2217/arrow-datafusion" }
-datafusion-physical-expr = { git="https://github.com/Nekit2217/arrow-datafusion" }
-datafusion-functions = { git="https://github.com/Nekit2217/arrow-datafusion" }
-datafusion-functions-aggregate = { git="https://github.com/Nekit2217/arrow-datafusion" }
+datafusion = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
+datafusion-expr = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
+datafusion-common = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
+datafusion-proto = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
+datafusion-sql = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
+datafusion-physical-expr = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
+datafusion-functions = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
+datafusion-functions-aggregate = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
 
 # serde
 serde = { version = "1.0.194", features = ["derive"] }
