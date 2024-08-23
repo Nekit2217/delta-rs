@@ -26,34 +26,34 @@ debug = true
 debug = "line-tables-only"
 
 [workspace.dependencies]
-delta_kernel = { version = "0.3.0" }
+delta_kernel = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-main" }
 # delta_kernel = { path = "../delta-kernel-rs/kernel" }
 # delta_kernel = { path = "../delta-kernel-rs/kernel", version = "0.3.0" }
 
 # arrow
-arrow = { version = "52" }
-arrow-arith = { version = "52" }
-arrow-array = { version = "52", features = ["chrono-tz"] }
-arrow-buffer = { version = "52" }
-arrow-cast = { version = "52" }
-arrow-ipc = { version = "52" }
-arrow-json = { version = "52" }
-arrow-ord = { version = "52" }
-arrow-row = { version = "52" }
-arrow-schema = { version = "52" }
-arrow-select = { version = "52" }
-object_store = { version = "0.10.1" }
-parquet = { version = "52" }
+arrow = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
+arrow-arith = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
+arrow-array = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master", features = ["chrono-tz"] }
+arrow-buffer = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
+arrow-cast = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
+arrow-ipc = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
+arrow-json = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
+arrow-ord = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
+arrow-row = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
+arrow-schema = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
+arrow-select = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
+object_store = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
+parquet = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
 
 # datafusion
-datafusion = { version = "41" }
-datafusion-expr = { version = "41" }
-datafusion-common = { version = "41" }
-datafusion-proto = { version = "41" }
-datafusion-sql = { version = "41" }
-datafusion-physical-expr = { version = "41" }
-datafusion-functions = { version = "41" }
-datafusion-functions-aggregate = { version = "41" }
+datafusion = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-master" }
+datafusion-expr = { git="https://github.com/Nekit2217/arrow-datafusion" }
+datafusion-common = { git="https://github.com/Nekit2217/arrow-datafusion" }
+datafusion-proto = { git="https://github.com/Nekit2217/arrow-datafusion" }
+datafusion-sql = { git="https://github.com/Nekit2217/arrow-datafusion" }
+datafusion-physical-expr = { git="https://github.com/Nekit2217/arrow-datafusion" }
+datafusion-functions = { git="https://github.com/Nekit2217/arrow-datafusion" }
+datafusion-functions-aggregate = { git="https://github.com/Nekit2217/arrow-datafusion" }
 
 # serde
 serde = { version = "1.0.194", features = ["derive"] }
