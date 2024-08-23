@@ -91,7 +91,7 @@ pub(super) fn read_adds(array: &dyn ProvidesColumnByName) -> DeltaResult<Vec<Add
             let storage_type = ex::extract_and_cast::<StringArray>(d, "storageType")?;
             let path_or_inline_dv = ex::extract_and_cast::<StringArray>(d, "pathOrInlineDv")?;
             let offset = ex::extract_and_cast::<Int32Array>(d, "offset")?;
-            let size_in_bytes = ex::extract_and_cast::<Int64Array>(d, "sizeInBytes")?;
+            let size_in_bytes = ex::extract_and_cast::<Int32Array>(d, "sizeInBytes")?;
             let cardinality = ex::extract_and_cast::<Int64Array>(d, "cardinality")?;
 
             Box::new(|idx: usize| {
@@ -206,7 +206,7 @@ pub(super) fn read_removes(array: &dyn ProvidesColumnByName) -> DeltaResult<Vec<
             let storage_type = ex::extract_and_cast::<StringArray>(d, "storageType")?;
             let path_or_inline_dv = ex::extract_and_cast::<StringArray>(d, "pathOrInlineDv")?;
             let offset = ex::extract_and_cast::<Int32Array>(d, "offset")?;
-            let size_in_bytes = ex::extract_and_cast::<Int64Array>(d, "sizeInBytes")?;
+            let size_in_bytes = ex::extract_and_cast::<Int32Array>(d, "sizeInBytes")?;
             let cardinality = ex::extract_and_cast::<Int64Array>(d, "cardinality")?;
 
             Box::new(|idx: usize| {
