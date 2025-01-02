@@ -45,7 +45,7 @@ impl S3DynamoDbLogStore {
         object_store: ObjectStoreRef,
     ) -> DeltaResult<Self> {
         let lock_client = DynamoDbLockClient::try_new(
-            &s3_options.sdk_config,
+            &s3_options.sdk_config.clone().unwrap(),
             s3_options
                 .extra_opts
                 .get(constants::LOCK_TABLE_KEY_NAME)
@@ -59,6 +59,10 @@ impl S3DynamoDbLogStore {
                 .get(constants::MAX_ELAPSED_REQUEST_TIME_KEY_NAME)
                 .cloned(),
             s3_options.dynamodb_endpoint.clone(),
+            s3_options.dynamodb_region.clone(),
+            s3_options.dynamodb_access_key_id.clone(),
+            s3_options.dynamodb_secret_access_key.clone(),
+            s3_options.dynamodb_session_token.clone(),
         )
         .map_err(|err| DeltaTableError::ObjectStore {
             source: ObjectStoreError::Generic {
@@ -199,8 +203,12 @@ impl LogStore for S3DynamoDbLogStore {
     async fn write_commit_entry(
         &self,
         version: i64,
-        tmp_commit: &Path,
+        commit_or_bytes: CommitOrBytes,
     ) -> Result<(), TransactionError> {
+        let tmp_commit = match commit_or_bytes {
+            CommitOrBytes::TmpCommit(tmp_commit) => tmp_commit,
+            _ => unreachable!(), // S3DynamoDBLogstore should never get Bytes
+        };
         let entry = CommitEntry::new(version, tmp_commit.clone());
         debug!("Writing commit entry for {self:?}: {entry:?}");
         // create log entry in dynamo db: complete = false, no expireTime
@@ -244,8 +252,12 @@ impl LogStore for S3DynamoDbLogStore {
     async fn abort_commit_entry(
         &self,
         version: i64,
-        tmp_commit: &Path,
+        commit_or_bytes: CommitOrBytes,
     ) -> Result<(), TransactionError> {
+        let tmp_commit = match commit_or_bytes {
+            CommitOrBytes::TmpCommit(tmp_commit) => tmp_commit,
+            _ => unreachable!(), // S3DynamoDBLogstore should never get Bytes
+        };
         self.lock_client
             .delete_commit_entry(version, &self.table_path)
             .await
@@ -266,7 +278,7 @@ impl LogStore for S3DynamoDbLogStore {
                 },
             })?;
 
-        abort_commit_entry(&self.storage, version, tmp_commit).await?;
+        abort_commit_entry(&self.storage, version, &tmp_commit).await?;
         Ok(())
     }
 
@@ -286,6 +298,10 @@ impl LogStore for S3DynamoDbLogStore {
         } else {
             get_latest_version(self, current_version).await
         }
+    }
+
+    async fn get_earliest_version(&self, current_version: i64) -> DeltaResult<i64> {
+        get_earliest_version(self, current_version).await
     }
 
     fn object_store(&self) -> ObjectStoreRef {
@@ -308,14 +324,4 @@ pub enum RepairLogEntryResult {
     MovedFile,
     /// Both parts of the repair process where already carried.
     AlreadyCompleted,
-}
-
-/// Represents the possible, positive outcomes of calling `DynamoDbClient::try_create_lock_table()`
-#[derive(Debug, PartialEq)]
-pub enum CreateLockTableResult {
-    /// Table created successfully.
-    TableCreated,
-    /// Table was not created because it already exists.
-    /// Does not imply that the table has the correct schema.
-    TableAlreadyExists,
 }

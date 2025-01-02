@@ -2,9 +2,11 @@
 
 #![allow(non_camel_case_types)]
 
-pub mod checkpoints;
-mod parquet_read;
-mod time_utils;
+use std::borrow::Borrow;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::mem::take;
+use std::str::FromStr;
 
 use arrow_schema::ArrowError;
 use futures::StreamExt;
@@ -13,17 +15,16 @@ use object_store::{path::Path, Error as ObjectStoreError, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::borrow::Borrow;
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
-use std::mem::take;
-use std::str::FromStr;
 use tracing::{debug, error};
 
 use crate::errors::{DeltaResult, DeltaTableError};
-use crate::kernel::{Add, CommitInfo, Metadata, Protocol, Remove, StructField};
+use crate::kernel::{Add, CommitInfo, Metadata, Protocol, Remove, StructField, TableFeatures};
 use crate::logstore::LogStore;
 use crate::table::CheckPoint;
+
+pub mod checkpoints;
+mod parquet_read;
+mod time_utils;
 
 /// Error returned when an invalid Delta log action is encountered.
 #[allow(missing_docs)]
@@ -258,17 +259,11 @@ impl Add {
 
     /// Returns the serde_json representation of stats contained in the action if present.
     /// Since stats are defined as optional in the protocol, this may be None.
-    fn get_json_stats(&self) -> Result<Option<Stats>, serde_json::error::Error> {
-        let ps: Result<Option<PartialStats>, serde_json::error::Error> = self
-            .stats
+    pub fn get_json_stats(&self) -> Result<Option<Stats>, serde_json::error::Error> {
+        self.stats
             .as_ref()
-            .map_or(Ok(None), |s| serde_json::from_str(s));
-
-        match ps {
-            Ok(Some(mut partial)) => Ok(Some(partial.as_stats())),
-            Ok(None) => Ok(None),
-            Err(e) => Err(e),
-        }
+            .map(|stats| serde_json::from_str(stats).map(|mut ps: PartialStats| ps.as_stats()))
+            .transpose()
     }
 }
 
@@ -367,6 +362,12 @@ pub enum DeltaOperation {
         name: String,
         /// Expression to check against
         expr: String,
+    },
+
+    /// Add table features to a table
+    AddFeature {
+        /// Name of the feature
+        name: Vec<TableFeatures>,
     },
 
     /// Drops constraints from a table
@@ -475,6 +476,7 @@ impl DeltaOperation {
             DeltaOperation::VacuumEnd { .. } => "VACUUM END",
             DeltaOperation::AddConstraint { .. } => "ADD CONSTRAINT",
             DeltaOperation::DropConstraint { .. } => "DROP CONSTRAINT",
+            DeltaOperation::AddFeature { .. } => "ADD FEATURE",
         }
     }
 
@@ -513,6 +515,7 @@ impl DeltaOperation {
             Self::Optimize { .. }
             | Self::SetTableProperties { .. }
             | Self::AddColumn { .. }
+            | Self::AddFeature { .. }
             | Self::VacuumStart { .. }
             | Self::VacuumEnd { .. }
             | Self::AddConstraint { .. }
@@ -1224,6 +1227,15 @@ mod tests {
             assert_eq!(&expected_path, path_column);
             assert_eq!(&expected_num_records, num_records_column);
             assert_eq!(&expected_null_count, null_count_column);
+        }
+
+        #[tokio::test]
+        async fn test_table_checkpoint_not_always_with_stats() {
+            let path = "../test/tests/data/delta-checkpoint-stats-optional";
+            let mut table = crate::open_table(path).await.unwrap();
+            table.load().await.unwrap();
+
+            assert_eq!(2, table.snapshot().unwrap().file_actions().unwrap().len());
         }
 
         #[tokio::test]

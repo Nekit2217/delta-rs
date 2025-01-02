@@ -78,12 +78,16 @@ pub(super) fn read_adds(array: &dyn ProvidesColumnByName) -> DeltaResult<Vec<Add
     let mut result = Vec::new();
 
     if let Some(arr) = ex::extract_and_cast_opt::<StructArray>(array, "add") {
+        // Stop early if all values are null
+        if arr.null_count() == arr.len() {
+            return Ok(vec![]);
+        }
         let path = ex::extract_and_cast::<StringArray>(arr, "path")?;
         let pvs = ex::extract_and_cast_opt::<MapArray>(arr, "partitionValues");
         let size = ex::extract_and_cast::<Int64Array>(arr, "size")?;
         let modification_time = ex::extract_and_cast::<Int64Array>(arr, "modificationTime")?;
         let data_change = ex::extract_and_cast::<BooleanArray>(arr, "dataChange")?;
-        let stats = ex::extract_and_cast::<StringArray>(arr, "stats")?;
+        let stats = ex::extract_and_cast_opt::<StringArray>(arr, "stats");
         let tags = ex::extract_and_cast_opt::<MapArray>(arr, "tags");
         let dv = ex::extract_and_cast_opt::<StructArray>(arr, "deletionVector");
 
@@ -94,22 +98,33 @@ pub(super) fn read_adds(array: &dyn ProvidesColumnByName) -> DeltaResult<Vec<Add
             let size_in_bytes = ex::extract_and_cast::<Int32Array>(d, "sizeInBytes")?;
             let cardinality = ex::extract_and_cast::<Int64Array>(d, "cardinality")?;
 
-            Box::new(|idx: usize| {
-                if ex::read_str(storage_type, idx).is_ok() {
-                    Some(DeletionVectorDescriptor {
-                        storage_type: std::str::FromStr::from_str(
-                            ex::read_str(storage_type, idx).ok()?,
-                        )
-                        .ok()?,
-                        path_or_inline_dv: ex::read_str(path_or_inline_dv, idx).ok()?.to_string(),
-                        offset: ex::read_primitive_opt(offset, idx),
-                        size_in_bytes: ex::read_primitive(size_in_bytes, idx).ok()?,
-                        cardinality: ex::read_primitive(cardinality, idx).ok()?,
-                    })
-                } else {
-                    None
-                }
-            })
+            // Column might exist but have nullability set for the whole array, so we just return Nones
+            if d.null_count() == d.len() {
+                Box::new(|_| None)
+            } else {
+                Box::new(|idx: usize| {
+                    d.is_valid(idx)
+                        .then(|| {
+                            if ex::read_str(storage_type, idx).is_ok() {
+                                Some(DeletionVectorDescriptor {
+                                    storage_type: std::str::FromStr::from_str(
+                                        ex::read_str(storage_type, idx).ok()?,
+                                    )
+                                    .ok()?,
+                                    path_or_inline_dv: ex::read_str(path_or_inline_dv, idx)
+                                        .ok()?
+                                        .to_string(),
+                                    offset: ex::read_primitive_opt(offset, idx),
+                                    size_in_bytes: ex::read_primitive(size_in_bytes, idx).ok()?,
+                                    cardinality: ex::read_primitive(cardinality, idx).ok()?,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .flatten()
+                })
+            }
         } else {
             Box::new(|_| None)
         };
@@ -126,7 +141,8 @@ pub(super) fn read_adds(array: &dyn ProvidesColumnByName) -> DeltaResult<Vec<Add
                     size: ex::read_primitive(size, i)?,
                     modification_time: ex::read_primitive(modification_time, i)?,
                     data_change: ex::read_bool(data_change, i)?,
-                    stats: ex::read_str_opt(stats, i).map(|s| s.to_string()),
+                    stats: stats
+                        .and_then(|stats| ex::read_str_opt(stats, i).map(|s| s.to_string())),
                     partition_values: pvs
                         .and_then(|pv| collect_map(&pv.value(i)).map(|m| m.collect()))
                         .unwrap_or_default(),
@@ -209,22 +225,33 @@ pub(super) fn read_removes(array: &dyn ProvidesColumnByName) -> DeltaResult<Vec<
             let size_in_bytes = ex::extract_and_cast::<Int32Array>(d, "sizeInBytes")?;
             let cardinality = ex::extract_and_cast::<Int64Array>(d, "cardinality")?;
 
-            Box::new(|idx: usize| {
-                if ex::read_str(storage_type, idx).is_ok() {
-                    Some(DeletionVectorDescriptor {
-                        storage_type: std::str::FromStr::from_str(
-                            ex::read_str(storage_type, idx).ok()?,
-                        )
-                        .ok()?,
-                        path_or_inline_dv: ex::read_str(path_or_inline_dv, idx).ok()?.to_string(),
-                        offset: ex::read_primitive_opt(offset, idx),
-                        size_in_bytes: ex::read_primitive(size_in_bytes, idx).ok()?,
-                        cardinality: ex::read_primitive(cardinality, idx).ok()?,
-                    })
-                } else {
-                    None
-                }
-            })
+            // Column might exist but have nullability set for the whole array, so we just return Nones
+            if d.null_count() == d.len() {
+                Box::new(|_| None)
+            } else {
+                Box::new(|idx: usize| {
+                    d.is_valid(idx)
+                        .then(|| {
+                            if ex::read_str(storage_type, idx).is_ok() {
+                                Some(DeletionVectorDescriptor {
+                                    storage_type: std::str::FromStr::from_str(
+                                        ex::read_str(storage_type, idx).ok()?,
+                                    )
+                                    .ok()?,
+                                    path_or_inline_dv: ex::read_str(path_or_inline_dv, idx)
+                                        .ok()?
+                                        .to_string(),
+                                    offset: ex::read_primitive_opt(offset, idx),
+                                    size_in_bytes: ex::read_primitive(size_in_bytes, idx).ok()?,
+                                    cardinality: ex::read_primitive(cardinality, idx).ok()?,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .flatten()
+                })
+            }
         } else {
             Box::new(|_| None)
         };

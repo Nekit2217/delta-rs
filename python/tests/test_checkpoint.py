@@ -468,3 +468,34 @@ def test_checkpoint_with_nullable_false(tmp_path: pathlib.Path):
     assert checkpoint_path.exists()
 
     assert DeltaTable(str(tmp_table_path)).to_pyarrow_table() == data
+
+
+@pytest.mark.pandas
+def test_checkpoint_with_multiple_writes(tmp_path: pathlib.Path):
+    import pandas as pd
+
+    write_deltalake(
+        tmp_path,
+        pd.DataFrame(
+            {
+                "a": ["a"],
+                "b": [3],
+            }
+        ),
+    )
+    dt = DeltaTable(tmp_path)
+    dt.create_checkpoint()
+    assert dt.version() == 0
+    df = pd.DataFrame(
+        {
+            "a": ["a"],
+            "b": [100],
+        }
+    )
+    write_deltalake(tmp_path, df, mode="overwrite")
+
+    dt = DeltaTable(tmp_path)
+    assert dt.version() == 1
+    new_df = dt.to_pandas()
+    print(dt.to_pandas())
+    assert len(new_df) == 1, "We overwrote! there should only be one row"

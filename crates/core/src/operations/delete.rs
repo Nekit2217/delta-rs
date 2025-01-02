@@ -17,22 +17,18 @@
 //!     .await?;
 //! ````
 
-use crate::delta_datafusion::logical::MetricObserver;
-use crate::delta_datafusion::physical::{find_metric_node, get_metric, MetricObserverExec};
-use crate::delta_datafusion::planner::DeltaPlanner;
-use crate::logstore::LogStoreRef;
 use async_trait::async_trait;
 use datafusion::dataframe::DataFrame;
 use datafusion::datasource::provider_as_source;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::{SessionContext, SessionState};
 use datafusion::execution::session_state::SessionStateBuilder;
-use datafusion::physical_plan::metrics::MetricBuilder;
-use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion::prelude::Expr;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{lit, Extension, LogicalPlan, LogicalPlanBuilder, UserDefinedLogicalNode};
+use datafusion_physical_plan::metrics::MetricBuilder;
+use datafusion_physical_plan::ExecutionPlan;
 
 use futures::future::BoxFuture;
 use std::sync::Arc;
@@ -44,14 +40,17 @@ use serde::Serialize;
 use super::cdc::should_write_cdc;
 use super::datafusion_utils::Expression;
 use super::transaction::{CommitBuilder, CommitProperties, PROTOCOL};
-
 use crate::delta_datafusion::expr::fmt_expr_to_sql;
+use crate::delta_datafusion::logical::MetricObserver;
+use crate::delta_datafusion::physical::{find_metric_node, get_metric, MetricObserverExec};
+use crate::delta_datafusion::planner::DeltaPlanner;
 use crate::delta_datafusion::{
     find_files, register_store, DataFusionMixins, DeltaScanConfigBuilder, DeltaSessionContext,
     DeltaTableProvider,
 };
 use crate::errors::DeltaResult;
 use crate::kernel::{Action, Add, Remove};
+use crate::logstore::LogStoreRef;
 use crate::operations::write::{write_execution_plan, write_execution_plan_cdc, WriterStatsConfig};
 use crate::protocol::DeltaOperation;
 use crate::table::state::DeltaTableState;
@@ -136,7 +135,7 @@ impl DeleteBuilder {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct DeleteMetricExtensionPlanner {}
 
 #[async_trait]
@@ -294,6 +293,10 @@ async fn execute(
     writer_properties: Option<WriterProperties>,
     mut commit_properties: CommitProperties,
 ) -> DeltaResult<(DeltaTableState, DeleteMetrics)> {
+    if !&snapshot.load_config().require_files {
+        return Err(DeltaTableError::NotInitializedWithFiles("DELETE".into()));
+    }
+
     let exec_start = Instant::now();
     let mut metrics = DeleteMetrics::default();
 
@@ -429,8 +432,8 @@ mod tests {
     use crate::writer::test_utils::{
         get_arrow_schema, get_delta_schema, get_record_batch, setup_table_with_configuration,
     };
-    use crate::DeltaConfigKey;
     use crate::DeltaTable;
+    use crate::TableProperty;
     use arrow::array::Int32Array;
     use arrow::datatypes::{Field, Schema};
     use arrow::record_batch::RecordBatch;
@@ -462,7 +465,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_when_delta_table_is_append_only() {
-        let table = setup_table_with_configuration(DeltaConfigKey::AppendOnly, Some("true")).await;
+        let table = setup_table_with_configuration(TableProperty::AppendOnly, Some("true")).await;
         let batch = get_record_batch(None, false);
         // append some data
         let table = write_batch(table, batch).await;
@@ -906,7 +909,7 @@ mod tests {
                 true,
                 None,
             )
-            .with_configuration_property(DeltaConfigKey::EnableChangeDataFeed, Some("true"))
+            .with_configuration_property(TableProperty::EnableChangeDataFeed, Some("true"))
             .await
             .unwrap();
         assert_eq!(table.version(), 0);
@@ -984,7 +987,7 @@ mod tests {
                 None,
             )
             .with_partition_columns(vec!["year"])
-            .with_configuration_property(DeltaConfigKey::EnableChangeDataFeed, Some("true"))
+            .with_configuration_property(TableProperty::EnableChangeDataFeed, Some("true"))
             .await
             .unwrap();
         assert_eq!(table.version(), 0);

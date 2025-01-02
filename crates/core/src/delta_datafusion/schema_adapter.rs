@@ -1,9 +1,11 @@
-use crate::operations::cast::cast_record_batch;
+use std::fmt::Debug;
+use std::sync::Arc;
+
 use arrow_array::RecordBatch;
 use arrow_schema::{Schema, SchemaRef};
 use datafusion::datasource::schema_adapter::{SchemaAdapter, SchemaAdapterFactory, SchemaMapper};
-use std::fmt::Debug;
-use std::sync::Arc;
+
+use crate::operations::cast::cast_record_batch;
 
 /// A Schema Adapter Factory which provides casting record batches from parquet to meet
 /// delta lake conventions.
@@ -11,14 +13,22 @@ use std::sync::Arc;
 pub(crate) struct DeltaSchemaAdapterFactory {}
 
 impl SchemaAdapterFactory for DeltaSchemaAdapterFactory {
-    fn create(&self, schema: SchemaRef) -> Box<dyn SchemaAdapter> {
+    fn create(
+        &self,
+        projected_table_schema: SchemaRef,
+        table_schema: SchemaRef,
+    ) -> Box<dyn SchemaAdapter> {
         Box::new(DeltaSchemaAdapter {
-            table_schema: schema,
+            projected_table_schema,
+            table_schema,
         })
     }
 }
 
 pub(crate) struct DeltaSchemaAdapter {
+    /// The schema for the table, projected to include only the fields being output (projected) by
+    /// the mapping.
+    projected_table_schema: SchemaRef,
     /// Schema for the table
     table_schema: SchemaRef,
 }
@@ -43,6 +53,7 @@ impl SchemaAdapter for DeltaSchemaAdapter {
 
         Ok((
             Arc::new(SchemaMapping {
+                projected_schema: self.projected_table_schema.clone(),
                 table_schema: self.table_schema.clone(),
             }),
             projection,
@@ -52,12 +63,13 @@ impl SchemaAdapter for DeltaSchemaAdapter {
 
 #[derive(Debug)]
 pub(crate) struct SchemaMapping {
+    projected_schema: SchemaRef,
     table_schema: SchemaRef,
 }
 
 impl SchemaMapper for SchemaMapping {
     fn map_batch(&self, batch: RecordBatch) -> datafusion_common::Result<RecordBatch> {
-        let record_batch = cast_record_batch(&batch, self.table_schema.clone(), false, true)?;
+        let record_batch = cast_record_batch(&batch, self.projected_schema.clone(), false, true)?;
         Ok(record_batch)
     }
 

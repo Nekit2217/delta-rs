@@ -2,9 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow_array::{
-    Array, Int32Array, Int64Array, MapArray, RecordBatch, StringArray, StructArray, UInt64Array,
-};
+use arrow_array::{Array, Int32Array, Int64Array, MapArray, RecordBatch, StringArray, StructArray};
 use chrono::{DateTime, Utc};
 use delta_kernel::expressions::Scalar;
 use indexmap::IndexMap;
@@ -373,18 +371,23 @@ impl<'a> FileStatsAccessor<'a> {
         );
         let deletion_vector = extract_and_cast_opt::<StructArray>(data, "add.deletionVector");
         let deletion_vector = deletion_vector.and_then(|dv| {
-            let storage_type = extract_and_cast::<StringArray>(dv, "storageType").ok()?;
-            let path_or_inline_dv = extract_and_cast::<StringArray>(dv, "pathOrInlineDv").ok()?;
-            let size_in_bytes = extract_and_cast::<Int32Array>(dv, "sizeInBytes").ok()?;
-            let cardinality = extract_and_cast::<Int64Array>(dv, "cardinality").ok()?;
-            let offset = extract_and_cast_opt::<Int32Array>(dv, "offset");
-            Some(DeletionVector {
-                storage_type,
-                path_or_inline_dv,
-                size_in_bytes,
-                cardinality,
-                offset,
-            })
+            if dv.null_count() == dv.len() {
+                None
+            } else {
+                let storage_type = extract_and_cast::<StringArray>(dv, "storageType").ok()?;
+                let path_or_inline_dv =
+                    extract_and_cast::<StringArray>(dv, "pathOrInlineDv").ok()?;
+                let size_in_bytes = extract_and_cast::<Int32Array>(dv, "sizeInBytes").ok()?;
+                let cardinality = extract_and_cast::<Int64Array>(dv, "cardinality").ok()?;
+                let offset = extract_and_cast_opt::<Int32Array>(dv, "offset");
+                Some(DeletionVector {
+                    storage_type,
+                    path_or_inline_dv,
+                    size_in_bytes,
+                    cardinality,
+                    offset,
+                })
+            }
         });
 
         Ok(Self {
@@ -484,7 +487,7 @@ mod datafusion {
     use ::datafusion::physical_plan::Accumulator;
     use arrow::compute::concat_batches;
     use arrow_arith::aggregate::sum;
-    use arrow_array::{ArrayRef, BooleanArray, Int64Array};
+    use arrow_array::{ArrayRef, BooleanArray, Int64Array, UInt64Array};
     use arrow_schema::DataType as ArrowDataType;
     use datafusion_common::scalar::ScalarValue;
     use datafusion_common::stats::{ColumnStatistics, Precision, Statistics};
@@ -511,7 +514,9 @@ mod datafusion {
         fn collect_count(&self, name: &str) -> Precision<usize> {
             let num_records = extract_and_cast_opt::<Int64Array>(self.stats, name);
             if let Some(num_records) = num_records {
-                if let Some(null_count_mulls) = num_records.nulls() {
+                if num_records.is_empty() {
+                    Precision::Exact(0)
+                } else if let Some(null_count_mulls) = num_records.nulls() {
                     if null_count_mulls.null_count() > 0 {
                         Precision::Absent
                     } else {

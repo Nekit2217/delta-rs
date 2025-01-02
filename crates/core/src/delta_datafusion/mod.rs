@@ -21,22 +21,20 @@
 //! ```
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug};
 use std::sync::Arc;
 
-use arrow::compute::{cast_with_options, CastOptions};
-use arrow::datatypes::DataType;
-use arrow::datatypes::{
-    DataType as ArrowDataType, Schema as ArrowSchema, SchemaRef, SchemaRef as ArrowSchemaRef,
-    TimeUnit,
-};
-use arrow::error::ArrowError;
-use arrow::record_batch::RecordBatch;
 use arrow_array::types::UInt16Type;
-use arrow_array::{Array, DictionaryArray, StringArray, TypedDictionaryArray};
+use arrow_array::{Array, DictionaryArray, RecordBatch, StringArray, TypedDictionaryArray};
 use arrow_cast::display::array_value_to_string;
-use arrow_schema::Field;
+use arrow_cast::{cast_with_options, CastOptions};
+use arrow_schema::{
+    ArrowError, DataType as ArrowDataType, Field, Schema as ArrowSchema, SchemaRef,
+    SchemaRef as ArrowSchemaRef, TimeUnit,
+};
+use arrow_select::concat::concat_batches;
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use datafusion::catalog::{Session, TableProviderFactory};
@@ -50,13 +48,6 @@ use datafusion::execution::context::{SessionConfig, SessionContext, SessionState
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::execution::FunctionRegistry;
 use datafusion::physical_optimizer::pruning::PruningPredicate;
-use datafusion::physical_plan::filter::FilterExec;
-use datafusion::physical_plan::limit::LocalLimitExec;
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
-    Statistics,
-};
 use datafusion_common::scalar::ScalarValue;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{
@@ -66,6 +57,13 @@ use datafusion_common::{
 use datafusion_expr::logical_plan::CreateExternalTable;
 use datafusion_expr::utils::conjunction;
 use datafusion_expr::{col, Expr, Extension, LogicalPlan, TableProviderFilterPushDown, Volatility};
+use datafusion_physical_plan::filter::FilterExec;
+use datafusion_physical_plan::limit::LocalLimitExec;
+use datafusion_physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, MetricsSet};
+use datafusion_physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+    Statistics,
+};
 use datafusion_proto::logical_plan::LogicalExtensionCodec;
 use datafusion_proto::physical_plan::PhysicalExtensionCodec;
 use datafusion_sql::planner::ParserOptions;
@@ -94,7 +92,6 @@ pub mod logical;
 pub mod physical;
 pub mod planner;
 
-mod find_files;
 mod schema_adapter;
 
 impl From<DeltaTableError> for DataFusionError {
@@ -210,10 +207,10 @@ fn _arrow_schema(snapshot: &Snapshot, wrap_partitions: bool) -> DeltaResult<Arro
                     match field.data_type() {
                         // Only dictionary-encode types that may be large
                         // // https://github.com/apache/arrow-datafusion/pull/5545
-                        DataType::Utf8
-                        | DataType::LargeUtf8
-                        | DataType::Binary
-                        | DataType::LargeBinary => {
+                        ArrowDataType::Utf8
+                        | ArrowDataType::LargeUtf8
+                        | ArrowDataType::Binary
+                        | ArrowDataType::LargeBinary => {
                             wrap_partition_type_in_dict(field.data_type().clone())
                         }
                         _ => field.data_type().clone(),
@@ -227,17 +224,6 @@ fn _arrow_schema(snapshot: &Snapshot, wrap_partitions: bool) -> DeltaResult<Arro
         .collect::<Result<Vec<Field>, _>>()?;
 
     Ok(Arc::new(ArrowSchema::new(fields)))
-}
-
-pub(crate) trait DataFusionFileMixins {
-    /// Iterate over all files in the log matching a predicate
-    fn files_matching_predicate(&self, filters: &[Expr]) -> DeltaResult<impl Iterator<Item = Add>>;
-}
-
-impl DataFusionFileMixins for EagerSnapshot {
-    fn files_matching_predicate(&self, filters: &[Expr]) -> DeltaResult<impl Iterator<Item = Add>> {
-        files_matching_predicate(self, filters)
-    }
 }
 
 pub(crate) fn files_matching_predicate<'a>(
@@ -330,7 +316,11 @@ pub(crate) fn df_logical_schema(
     }
 
     if let Some(file_column_name) = file_column_name {
-        fields.push(Arc::new(Field::new(file_column_name, DataType::Utf8, true)));
+        fields.push(Arc::new(Field::new(
+            file_column_name,
+            ArrowDataType::Utf8,
+            true,
+        )));
     }
 
     Ok(Arc::new(ArrowSchema::new(fields)))
@@ -630,9 +620,9 @@ impl<'a> DeltaScanBuilder<'a> {
 
         if let Some(file_column_name) = &config.file_column_name {
             let field_name_datatype = if config.wrap_partition_values {
-                wrap_partition_type_in_dict(DataType::Utf8)
+                wrap_partition_type_in_dict(ArrowDataType::Utf8)
             } else {
-                DataType::Utf8
+                ArrowDataType::Utf8
             };
             table_partition_cols.push(Field::new(
                 file_column_name.clone(),
@@ -654,7 +644,15 @@ impl<'a> DeltaScanBuilder<'a> {
         let mut exec_plan_builder = ParquetExecBuilder::new(FileScanConfig {
             object_store_url: self.log_store.object_store_url(),
             file_schema,
-            file_groups: file_groups.into_values().collect(),
+            // If all files were filtered out, we still need to emit at least one partition to
+            // pass datafusion sanity checks.
+            //
+            // See https://github.com/apache/datafusion/issues/11322
+            file_groups: if file_groups.is_empty() {
+                vec![vec![]]
+            } else {
+                file_groups.into_values().collect()
+            },
             statistics: stats,
             projection: self.projection.cloned(),
             limit: self.limit,
@@ -710,7 +708,7 @@ impl TableProvider for DeltaTable {
         None
     }
 
-    fn get_logical_plan(&self) -> Option<&LogicalPlan> {
+    fn get_logical_plan(&self) -> Option<Cow<'_, LogicalPlan>> {
         None
     }
 
@@ -750,6 +748,7 @@ impl TableProvider for DeltaTable {
 }
 
 /// A Delta table provider that enables additional metadata columns to be included during the scan
+#[derive(Debug)]
 pub struct DeltaTableProvider {
     snapshot: DeltaTableState,
     log_store: LogStoreRef,
@@ -799,7 +798,7 @@ impl TableProvider for DeltaTableProvider {
         None
     }
 
-    fn get_logical_plan(&self) -> Option<&LogicalPlan> {
+    fn get_logical_plan(&self) -> Option<Cow<'_, LogicalPlan>> {
         None
     }
 
@@ -827,9 +826,12 @@ impl TableProvider for DeltaTableProvider {
 
     fn supports_filters_pushdown(
         &self,
-        _filter: &[&Expr],
+        filter: &[&Expr],
     ) -> DataFusionResult<Vec<TableProviderFilterPushDown>> {
-        Ok(vec![TableProviderFilterPushDown::Inexact])
+        Ok(filter
+            .iter()
+            .map(|_| TableProviderFilterPushDown::Inexact)
+            .collect())
     }
 
     fn statistics(&self) -> Option<Statistics> {
@@ -1006,7 +1008,7 @@ pub(crate) fn get_null_of_arrow_type(t: &ArrowDataType) -> DeltaResult<ScalarVal
     }
 }
 
-pub(crate) fn partitioned_file_from_action(
+fn partitioned_file_from_action(
     action: &Add,
     partition_columns: &[String],
     schema: &ArrowSchema,
@@ -1142,22 +1144,21 @@ pub(crate) async fn execute_plan_to_batch(
 
                 let batches = batch_stream.try_collect::<Vec<_>>().await?;
 
-                DataFusionResult::<_>::Ok(arrow::compute::concat_batches(&schema, batches.iter())?)
+                DataFusionResult::<_>::Ok(concat_batches(&schema, batches.iter())?)
             }
         }),
     )
     .await?;
 
-    let batch = arrow::compute::concat_batches(&plan.schema(), data.iter())?;
-
-    Ok(batch)
+    Ok(concat_batches(&plan.schema(), data.iter())?)
 }
 
-/// Responsible for checking batches of data conform to table's invariants.
-#[derive(Clone)]
+/// Responsible for checking batches of data conform to table's invariants, constraints and nullability.
+#[derive(Clone, Default)]
 pub struct DeltaDataChecker {
     constraints: Vec<Constraint>,
     invariants: Vec<Invariant>,
+    non_nullable_columns: Vec<String>,
     ctx: SessionContext,
 }
 
@@ -1167,6 +1168,7 @@ impl DeltaDataChecker {
         Self {
             invariants: vec![],
             constraints: vec![],
+            non_nullable_columns: vec![],
             ctx: DeltaSessionContext::default().into(),
         }
     }
@@ -1176,6 +1178,7 @@ impl DeltaDataChecker {
         Self {
             invariants,
             constraints: vec![],
+            non_nullable_columns: vec![],
             ctx: DeltaSessionContext::default().into(),
         }
     }
@@ -1185,6 +1188,7 @@ impl DeltaDataChecker {
         Self {
             constraints,
             invariants: vec![],
+            non_nullable_columns: vec![],
             ctx: DeltaSessionContext::default().into(),
         }
     }
@@ -1205,9 +1209,21 @@ impl DeltaDataChecker {
     pub fn new(snapshot: &DeltaTableState) -> Self {
         let invariants = snapshot.schema().get_invariants().unwrap_or_default();
         let constraints = snapshot.table_config().get_constraints();
+        let non_nullable_columns = snapshot
+            .schema()
+            .fields()
+            .filter_map(|f| {
+                if !f.is_nullable() {
+                    Some(f.name().clone())
+                } else {
+                    None
+                }
+            })
+            .collect_vec();
         Self {
             invariants,
             constraints,
+            non_nullable_columns,
             ctx: DeltaSessionContext::default().into(),
         }
     }
@@ -1217,8 +1233,33 @@ impl DeltaDataChecker {
     /// If it does not, it will return [DeltaTableError::InvalidData] with a list
     /// of values that violated each invariant.
     pub async fn check_batch(&self, record_batch: &RecordBatch) -> Result<(), DeltaTableError> {
+        self.check_nullability(record_batch)?;
         self.enforce_checks(record_batch, &self.invariants).await?;
         self.enforce_checks(record_batch, &self.constraints).await
+    }
+
+    /// Return true if all the nullability checks are valid
+    fn check_nullability(&self, record_batch: &RecordBatch) -> Result<bool, DeltaTableError> {
+        let mut violations = Vec::new();
+        for col in self.non_nullable_columns.iter() {
+            if let Some(arr) = record_batch.column_by_name(col) {
+                if arr.null_count() > 0 {
+                    violations.push(format!(
+                        "Non-nullable column violation for {col}, found {} null values",
+                        arr.null_count()
+                    ));
+                }
+            } else {
+                violations.push(format!(
+                    "Non-nullable column violation for {col}, not found in batch!"
+                ));
+            }
+        }
+        if !violations.is_empty() {
+            Err(DeltaTableError::InvalidData { violations })
+        } else {
+            Ok(true)
+        }
     }
 
     async fn enforce_checks<C: DataCheck>(
@@ -1370,6 +1411,7 @@ impl LogicalExtensionCodec for DeltaLogicalCodec {
 }
 
 /// Responsible for creating deltatables
+#[derive(Debug)]
 pub struct DeltaTableFactory {}
 
 #[async_trait]
@@ -1591,7 +1633,7 @@ pub(crate) async fn scan_memory_table(
             ))?
             .to_owned(),
     );
-    fields.push(Field::new(PATH_COLUMN, DataType::Utf8, false));
+    fields.push(Field::new(PATH_COLUMN, ArrowDataType::Utf8, false));
 
     for field in schema.fields() {
         if field.name().starts_with("partition.") {
@@ -1779,7 +1821,7 @@ mod tests {
     use crate::operations::write::SchemaMode;
     use crate::writer::test_utils::get_delta_schema;
     use arrow::array::StructArray;
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::datatypes::{Field, Schema};
     use chrono::{TimeZone, Utc};
     use datafusion::assert_batches_sorted_eq;
     use datafusion::datasource::physical_plan::ParquetExec;
@@ -1896,7 +1938,7 @@ mod tests {
         let file = partitioned_file_from_action(&action, &part_columns, &schema);
         let ref_file = PartitionedFile {
             object_meta: object_store::ObjectMeta {
-                location: Path::from("year=2015/month=1/part-00000-4dcb50d3-d017-450c-9df7-a7257dbd3c5d-c000.snappy.parquet".to_string()), 
+                location: Path::from("year=2015/month=1/part-00000-4dcb50d3-d017-450c-9df7-a7257dbd3c5d-c000.snappy.parquet".to_string()),
                 last_modified: Utc.timestamp_millis_opt(1660497727833).unwrap(),
                 size: 10644,
                 e_tag: None,
@@ -1913,8 +1955,8 @@ mod tests {
     #[tokio::test]
     async fn test_enforce_invariants() {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("a", DataType::Utf8, false),
-            Field::new("b", DataType::Int32, false),
+            Field::new("a", ArrowDataType::Utf8, false),
+            Field::new("b", ArrowDataType::Int32, false),
         ]));
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
@@ -1966,7 +2008,7 @@ mod tests {
         let struct_fields = schema.fields().clone();
         let schema = Arc::new(Schema::new(vec![Field::new(
             "x",
-            DataType::Struct(struct_fields),
+            ArrowDataType::Struct(struct_fields),
             false,
         )]));
         let inner = Arc::new(StructArray::from(batch));
@@ -1986,8 +2028,8 @@ mod tests {
         let codec = DeltaPhysicalCodec {};
 
         let schema = Arc::new(Schema::new(vec![
-            Field::new("a", DataType::Utf8, false),
-            Field::new("b", DataType::Int32, false),
+            Field::new("a", ArrowDataType::Utf8, false),
+            Field::new("b", ArrowDataType::Int32, false),
         ]));
         let exec_plan = Arc::from(DeltaScan {
             table_uri: "s3://my_bucket/this/is/some/path".to_string(),
@@ -2043,9 +2085,9 @@ mod tests {
         // Tests issue (1787) where partition columns were incorrect when they
         // have a different order in the metadata and table schema
         let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("modified", DataType::Utf8, true),
-            Field::new("id", DataType::Utf8, true),
-            Field::new("value", DataType::Int32, true),
+            Field::new("modified", ArrowDataType::Utf8, true),
+            Field::new("id", ArrowDataType::Utf8, true),
+            Field::new("value", ArrowDataType::Int32, true),
         ]));
 
         let table = crate::DeltaOps::new_in_memory()
@@ -2115,9 +2157,9 @@ mod tests {
     #[tokio::test]
     async fn delta_scan_case_sensitive() {
         let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("moDified", DataType::Utf8, true),
-            Field::new("ID", DataType::Utf8, true),
-            Field::new("vaLue", DataType::Int32, true),
+            Field::new("moDified", ArrowDataType::Utf8, true),
+            Field::new("ID", ArrowDataType::Utf8, true),
+            Field::new("vaLue", ArrowDataType::Int32, true),
         ]));
 
         let batch = RecordBatch::try_new(
@@ -2185,7 +2227,7 @@ mod tests {
     async fn delta_scan_supports_missing_columns() {
         let schema1 = Arc::new(ArrowSchema::new(vec![Field::new(
             "col_1",
-            DataType::Utf8,
+            ArrowDataType::Utf8,
             true,
         )]));
 
@@ -2199,8 +2241,8 @@ mod tests {
         .unwrap();
 
         let schema2 = Arc::new(ArrowSchema::new(vec![
-            Field::new("col_1", DataType::Utf8, true),
-            Field::new("col_2", DataType::Utf8, true),
+            Field::new("col_1", ArrowDataType::Utf8, true),
+            Field::new("col_2", ArrowDataType::Utf8, true),
         ]));
 
         let batch2 = RecordBatch::try_new(
@@ -2262,8 +2304,8 @@ mod tests {
     #[tokio::test]
     async fn delta_scan_supports_pushdown() {
         let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("col_1", DataType::Utf8, false),
-            Field::new("col_2", DataType::Utf8, false),
+            Field::new("col_1", ArrowDataType::Utf8, false),
+            Field::new("col_2", ArrowDataType::Utf8, false),
         ]));
 
         let batch = RecordBatch::try_new(
@@ -2320,10 +2362,10 @@ mod tests {
     #[tokio::test]
     async fn delta_scan_supports_nested_missing_columns() {
         let column1_schema1: arrow::datatypes::Fields =
-            vec![Field::new("col_1a", DataType::Utf8, true)].into();
+            vec![Field::new("col_1a", ArrowDataType::Utf8, true)].into();
         let schema1 = Arc::new(ArrowSchema::new(vec![Field::new(
             "col_1",
-            DataType::Struct(column1_schema1.clone()),
+            ArrowDataType::Struct(column1_schema1.clone()),
             true,
         )]));
 
@@ -2340,14 +2382,14 @@ mod tests {
         )
         .unwrap();
 
-        let column1_schema2: arrow::datatypes::Fields = vec![
-            Field::new("col_1a", DataType::Utf8, true),
-            Field::new("col_1b", DataType::Utf8, true),
+        let column1_schema2: arrow_schema::Fields = vec![
+            Field::new("col_1a", ArrowDataType::Utf8, true),
+            Field::new("col_1b", ArrowDataType::Utf8, true),
         ]
         .into();
         let schema2 = Arc::new(ArrowSchema::new(vec![Field::new(
             "col_1",
-            DataType::Struct(column1_schema2.clone()),
+            ArrowDataType::Struct(column1_schema2.clone()),
             true,
         )]));
 
@@ -2418,9 +2460,9 @@ mod tests {
     async fn test_multiple_predicate_pushdown() {
         use crate::datafusion::prelude::SessionContext;
         let schema = Arc::new(ArrowSchema::new(vec![
-            Field::new("moDified", DataType::Utf8, true),
-            Field::new("id", DataType::Utf8, true),
-            Field::new("vaLue", DataType::Int32, true),
+            Field::new("moDified", ArrowDataType::Utf8, true),
+            Field::new("id", ArrowDataType::Utf8, true),
+            Field::new("vaLue", ArrowDataType::Int32, true),
         ]));
 
         let batch = RecordBatch::try_new(
@@ -2577,5 +2619,61 @@ mod tests {
             }
             Ok(true)
         }
+    }
+
+    #[tokio::test]
+    async fn passes_sanity_checker_when_all_files_filtered() {
+        // Run a query that filters out all files and sorts.
+        // Verify that it returns an empty set of rows without panicing.
+        //
+        // Historically, we had a bug that caused us to emit a query plan with 0 partitions, which
+        // datafusion rejected.
+        let table = crate::open_table("../test/tests/data/delta-2.2.0-partitioned-types")
+            .await
+            .unwrap();
+        let ctx = SessionContext::new();
+        ctx.register_table("test", Arc::new(table)).unwrap();
+
+        let df = ctx
+            .sql("select * from test where c3 = 100 ORDER BY c1 ASC")
+            .await
+            .unwrap();
+        let actual = df.collect().await.unwrap();
+
+        assert_eq!(actual.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_check_nullability() -> DeltaResult<()> {
+        use arrow::array::StringArray;
+
+        let data_checker = DeltaDataChecker {
+            non_nullable_columns: vec!["zed".to_string(), "yap".to_string()],
+            ..Default::default()
+        };
+
+        let arr: Arc<dyn Array> = Arc::new(StringArray::from(vec!["s"]));
+        let nulls: Arc<dyn Array> = Arc::new(StringArray::new_null(1));
+        let batch = RecordBatch::try_from_iter(vec![("a", arr), ("zed", nulls)]).unwrap();
+
+        let result = data_checker.check_nullability(&batch);
+        assert!(
+            result.is_err(),
+            "The result should have errored! {result:?}"
+        );
+
+        let arr: Arc<dyn Array> = Arc::new(StringArray::from(vec!["s"]));
+        let batch = RecordBatch::try_from_iter(vec![("zed", arr)]).unwrap();
+        let result = data_checker.check_nullability(&batch);
+        assert!(
+            result.is_err(),
+            "The result should have errored! {result:?}"
+        );
+
+        let arr: Arc<dyn Array> = Arc::new(StringArray::from(vec!["s"]));
+        let batch = RecordBatch::try_from_iter(vec![("zed", arr.clone()), ("yap", arr)]).unwrap();
+        let _ = data_checker.check_nullability(&batch)?;
+
+        Ok(())
     }
 }

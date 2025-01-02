@@ -37,8 +37,7 @@ lazy_static! {
 /// specifically, this trait adds the ability to recognize valid log files and
 /// parse the version number from a log file path
 // TODO handle compaction files
-pub(super) trait PathExt {
-    fn child(&self, path: impl AsRef<str>) -> DeltaResult<Path>;
+pub(crate) trait PathExt {
     /// Returns the last path segment if not terminated with a "/"
     fn filename(&self) -> Option<&str>;
 
@@ -65,10 +64,6 @@ pub(super) trait PathExt {
 }
 
 impl PathExt for Path {
-    fn child(&self, path: impl AsRef<str>) -> DeltaResult<Path> {
-        Ok(self.child(path.as_ref()))
-    }
-
     fn filename(&self) -> Option<&str> {
         self.filename()
     }

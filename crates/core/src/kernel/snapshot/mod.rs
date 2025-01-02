@@ -8,7 +8,7 @@
 //!   bare minimum - [`Protocol`] and [`Metadata`] - is cached in memory.
 //! - [`EagerSnapshot`] is a snapshot where much more log data is eagerly loaded into memory.
 //!
-//! The sub modules provide structures and methods that aid in generating
+//! The submodules provide structures and methods that aid in generating
 //! and consuming snapshots.
 //!
 //! ## Reading the log
@@ -44,7 +44,7 @@ use crate::{DeltaResult, DeltaTableConfig, DeltaTableError};
 pub use self::log_data::*;
 
 mod log_data;
-mod log_segment;
+pub(crate) mod log_segment;
 pub(crate) mod parse;
 mod replay;
 mod serde;
@@ -193,6 +193,11 @@ impl Snapshot {
         &self.protocol
     }
 
+    /// Get the table config which is loaded with of the snapshot
+    pub fn load_config(&self) -> &DeltaTableConfig {
+        &self.config
+    }
+
     /// Get the table root of the snapshot
     pub fn table_root(&self) -> Path {
         Path::from(self.table_url.clone())
@@ -215,24 +220,14 @@ impl Snapshot {
         schema_actions.insert(ActionType::Add);
         let checkpoint_stream = self.log_segment.checkpoint_stream(
             store.clone(),
-            &StructType::new(
-                schema_actions
-                    .iter()
-                    .map(|a| a.schema_field().clone())
-                    .collect(),
-            ),
+            &StructType::new(schema_actions.iter().map(|a| a.schema_field().clone())),
             &self.config,
         );
 
         schema_actions.insert(ActionType::Remove);
         let log_stream = self.log_segment.commit_stream(
             store.clone(),
-            &StructType::new(
-                schema_actions
-                    .iter()
-                    .map(|a| a.schema_field().clone())
-                    .collect(),
-            ),
+            &StructType::new(schema_actions.iter().map(|a| a.schema_field().clone())),
             &self.config,
         )?;
 
@@ -364,8 +359,13 @@ impl EagerSnapshot {
             .iter()
             .flat_map(get_visitor)
             .collect::<Vec<_>>();
-        let snapshot = Snapshot::try_new(table_root, store.clone(), config, version).await?;
-        let files = snapshot.files(store, &mut visitors)?.try_collect().await?;
+        let snapshot =
+            Snapshot::try_new(table_root, store.clone(), config.clone(), version).await?;
+
+        let files = match config.require_files {
+            true => snapshot.files(store, &mut visitors)?.try_collect().await?,
+            false => vec![],
+        };
 
         let mut sn = Self {
             snapshot,
@@ -450,12 +450,8 @@ impl EagerSnapshot {
             // NOTE: we don't need to add the visitor relevant data here, as it is repüresented in teh state already
             futures::stream::iter(files.into_iter().map(Ok)).boxed()
         } else {
-            let read_schema = StructType::new(
-                schema_actions
-                    .iter()
-                    .map(|a| a.schema_field().clone())
-                    .collect(),
-            );
+            let read_schema =
+                StructType::new(schema_actions.iter().map(|a| a.schema_field().clone()));
             new_slice
                 .checkpoint_stream(
                     log_store.object_store(),
@@ -466,12 +462,7 @@ impl EagerSnapshot {
         };
 
         schema_actions.insert(ActionType::Remove);
-        let read_schema = StructType::new(
-            schema_actions
-                .iter()
-                .map(|a| a.schema_field().clone())
-                .collect(),
-        );
+        let read_schema = StructType::new(schema_actions.iter().map(|a| a.schema_field().clone()));
         let log_stream = new_slice.commit_stream(
             log_store.object_store().clone(),
             &read_schema,
@@ -528,6 +519,11 @@ impl EagerSnapshot {
     /// Get the table root of the snapshot
     pub fn table_root(&self) -> Path {
         self.snapshot.table_root()
+    }
+
+    /// Get the table config which is loaded with of the snapshot
+    pub fn load_config(&self) -> &DeltaTableConfig {
+        &self.snapshot.load_config()
     }
 
     /// Well known table configuration
@@ -603,12 +599,7 @@ impl EagerSnapshot {
         let mut schema_actions: HashSet<_> =
             visitors.iter().flat_map(|v| v.required_actions()).collect();
         schema_actions.extend([ActionType::Add, ActionType::Remove]);
-        let read_schema = StructType::new(
-            schema_actions
-                .iter()
-                .map(|a| a.schema_field().clone())
-                .collect(),
-        );
+        let read_schema = StructType::new(schema_actions.iter().map(|a| a.schema_field().clone()));
         let actions = self.snapshot.log_segment.advance(
             send,
             &self.table_root(),
@@ -657,7 +648,7 @@ impl EagerSnapshot {
     }
 }
 
-fn stats_schema<'a>(schema: &StructType, config: TableConfig<'a>) -> DeltaResult<StructType> {
+fn stats_schema(schema: &StructType, config: TableConfig<'_>) -> DeltaResult<StructType> {
     let stats_fields = if let Some(stats_cols) = config.stats_columns() {
         stats_cols
             .iter()
@@ -697,7 +688,7 @@ fn stats_schema<'a>(schema: &StructType, config: TableConfig<'a>) -> DeltaResult
         StructField::new("maxValues", StructType::new(stats_fields.clone()), true),
         StructField::new(
             "nullCount",
-            StructType::new(stats_fields.iter().filter_map(to_count_field).collect()),
+            StructType::new(stats_fields.iter().filter_map(to_count_field)),
             true,
         ),
     ]))
@@ -736,8 +727,7 @@ fn stats_field(idx: usize, num_indexed_cols: i32, field: &StructField) -> Option
             StructType::new(
                 dt_struct
                     .fields()
-                    .flat_map(|f| stats_field(idx, num_indexed_cols, f))
-                    .collect(),
+                    .flat_map(|f| stats_field(idx, num_indexed_cols, f)),
             ),
             true,
         )),
@@ -754,7 +744,7 @@ fn to_count_field(field: &StructField) -> Option<StructField> {
         DataType::Map(_) | DataType::Array(_) | &DataType::BINARY => None,
         DataType::Struct(s) => Some(StructField::new(
             field.name(),
-            StructType::new(s.fields().filter_map(to_count_field).collect::<Vec<_>>()),
+            StructType::new(s.fields().filter_map(to_count_field)),
             true,
         )),
         _ => Some(StructField::new(field.name(), DataType::LONG, true)),

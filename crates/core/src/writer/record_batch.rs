@@ -7,12 +7,11 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use arrow::array::{new_null_array, Array, UInt32Array};
-use arrow::compute::{partition, take};
-use arrow::record_batch::RecordBatch;
-use arrow_array::ArrayRef;
+use arrow_array::{new_null_array, Array, ArrayRef, RecordBatch, UInt32Array};
+use arrow_ord::partition::partition;
 use arrow_row::{RowConverter, SortField};
 use arrow_schema::{ArrowError, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
+use arrow_select::take::take;
 use bytes::Bytes;
 use delta_kernel::expressions::Scalar;
 use indexmap::IndexMap;
@@ -45,6 +44,8 @@ pub struct RecordBatchWriter {
     should_evolve: bool,
     partition_columns: Vec<String>,
     arrow_writers: HashMap<String, PartitionWriter>,
+    num_indexed_cols: i32,
+    stats_columns: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for RecordBatchWriter {
@@ -61,25 +62,39 @@ impl RecordBatchWriter {
         partition_columns: Option<Vec<String>>,
         storage_options: Option<HashMap<String, String>>,
     ) -> Result<Self, DeltaTableError> {
-        let storage = DeltaTableBuilder::from_uri(table_uri)
+        let delta_table = DeltaTableBuilder::from_uri(table_uri)
             .with_storage_options(storage_options.unwrap_or_default())
-            .build_storage()?
-            .object_store();
-
+            .build()?;
         // Initialize writer properties for the underlying arrow writer
         let writer_properties = WriterProperties::builder()
             // NOTE: Consider extracting config for writer properties and setting more than just compression
             .set_compression(Compression::SNAPPY)
             .build();
 
+        // if metadata fails to load, use an empty hashmap and default values for num_indexed_cols and stats_columns
+        let configuration: HashMap<String, Option<String>> = delta_table.metadata().map_or_else(
+            |_| HashMap::new(),
+            |metadata| metadata.configuration.clone(),
+        );
+
         Ok(Self {
-            storage,
+            storage: delta_table.object_store(),
             arrow_schema_ref: schema.clone(),
             original_schema_ref: schema,
             writer_properties,
             partition_columns: partition_columns.unwrap_or_default(),
             should_evolve: false,
             arrow_writers: HashMap::new(),
+            num_indexed_cols: configuration
+                .get("delta.dataSkippingNumIndexedCols")
+                .and_then(|v| v.clone().map(|v| v.parse::<i32>().unwrap()))
+                .unwrap_or(DEFAULT_NUM_INDEX_COLS),
+            stats_columns: configuration
+                .get("delta.dataSkippingStatsColumns")
+                .and_then(|v| {
+                    v.as_ref()
+                        .map(|v| v.split(',').map(|s| s.to_string()).collect())
+                }),
         })
     }
 
@@ -97,6 +112,8 @@ impl RecordBatchWriter {
             // NOTE: Consider extracting config for writer properties and setting more than just compression
             .set_compression(Compression::SNAPPY)
             .build();
+        let configuration: HashMap<String, Option<String>> =
+            table.metadata()?.configuration.clone();
 
         Ok(Self {
             storage: table.object_store(),
@@ -106,6 +123,16 @@ impl RecordBatchWriter {
             partition_columns,
             should_evolve: false,
             arrow_writers: HashMap::new(),
+            num_indexed_cols: configuration
+                .get("delta.dataSkippingNumIndexedCols")
+                .and_then(|v| v.clone().map(|v| v.parse::<i32>().unwrap()))
+                .unwrap_or(DEFAULT_NUM_INDEX_COLS),
+            stats_columns: configuration
+                .get("delta.dataSkippingStatsColumns")
+                .and_then(|v| {
+                    v.as_ref()
+                        .map(|v| v.split(',').map(|s| s.to_string()).collect())
+                }),
         })
     }
 
@@ -234,8 +261,8 @@ impl DeltaWriter<RecordBatch> for RecordBatchWriter {
                 path.to_string(),
                 file_size,
                 &metadata,
-                DEFAULT_NUM_INDEX_COLS,
-                &None,
+                self.num_indexed_cols,
+                &self.stats_columns,
             )?);
         }
         Ok(actions)
@@ -985,5 +1012,101 @@ mod tests {
                 result
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_write_data_skipping_stats_columns() {
+        let batch = get_record_batch(None, false);
+        let partition_cols: &[String] = &vec![];
+        let table_schema: StructType = get_delta_schema();
+        let table_dir = tempfile::tempdir().unwrap();
+        let table_path = table_dir.path();
+        let config: HashMap<String, Option<String>> = vec![(
+            "delta.dataSkippingStatsColumns".to_string(),
+            Some("id,value".to_string()),
+        )]
+        .into_iter()
+        .collect();
+
+        let mut table = CreateBuilder::new()
+            .with_location(table_path.to_str().unwrap())
+            .with_table_name("test-table")
+            .with_comment("A table for running tests")
+            .with_columns(table_schema.fields().cloned())
+            .with_configuration(config)
+            .with_partition_columns(partition_cols)
+            .await
+            .unwrap();
+
+        let mut writer = RecordBatchWriter::for_table(&table).unwrap();
+        let partitions = writer.divide_by_partition_values(&batch).unwrap();
+
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0].record_batch, batch);
+        writer.write(batch).await.unwrap();
+        writer.flush_and_commit(&mut table).await.unwrap();
+        assert_eq!(table.version(), 1);
+        let add_actions = table.state.unwrap().file_actions().unwrap();
+        assert_eq!(add_actions.len(), 1);
+        let expected_stats ="{\"numRecords\":11,\"minValues\":{\"value\":1,\"id\":\"A\"},\"maxValues\":{\"id\":\"B\",\"value\":11},\"nullCount\":{\"id\":0,\"value\":0}}";
+        assert_eq!(
+            expected_stats.parse::<serde_json::Value>().unwrap(),
+            add_actions
+                .into_iter()
+                .nth(0)
+                .unwrap()
+                .stats
+                .unwrap()
+                .parse::<serde_json::Value>()
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_data_skipping_num_indexed_colsn() {
+        let batch = get_record_batch(None, false);
+        let partition_cols: &[String] = &vec![];
+        let table_schema: StructType = get_delta_schema();
+        let table_dir = tempfile::tempdir().unwrap();
+        let table_path = table_dir.path();
+        let config: HashMap<String, Option<String>> = vec![(
+            "delta.dataSkippingNumIndexedCols".to_string(),
+            Some("1".to_string()),
+        )]
+        .into_iter()
+        .collect();
+
+        let mut table = CreateBuilder::new()
+            .with_location(table_path.to_str().unwrap())
+            .with_table_name("test-table")
+            .with_comment("A table for running tests")
+            .with_columns(table_schema.fields().cloned())
+            .with_configuration(config)
+            .with_partition_columns(partition_cols)
+            .await
+            .unwrap();
+
+        let mut writer = RecordBatchWriter::for_table(&table).unwrap();
+        let partitions = writer.divide_by_partition_values(&batch).unwrap();
+
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0].record_batch, batch);
+        writer.write(batch).await.unwrap();
+        writer.flush_and_commit(&mut table).await.unwrap();
+        assert_eq!(table.version(), 1);
+        let add_actions = table.state.unwrap().file_actions().unwrap();
+        assert_eq!(add_actions.len(), 1);
+        let expected_stats = "{\"numRecords\":11,\"minValues\":{\"id\":\"A\"},\"maxValues\":{\"id\":\"B\"},\"nullCount\":{\"id\":0}}";
+        assert_eq!(
+            expected_stats.parse::<serde_json::Value>().unwrap(),
+            add_actions
+                .into_iter()
+                .nth(0)
+                .unwrap()
+                .stats
+                .unwrap()
+                .parse::<serde_json::Value>()
+                .unwrap()
+        );
     }
 }

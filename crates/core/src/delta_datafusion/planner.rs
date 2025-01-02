@@ -24,7 +24,6 @@
 //! let state = state.with_query_planner(Arc::new(merge_planner));
 use std::sync::Arc;
 
-use crate::delta_datafusion::DataFusionResult;
 use async_trait::async_trait;
 use datafusion::physical_planner::PhysicalPlanner;
 use datafusion::{
@@ -34,14 +33,19 @@ use datafusion::{
 };
 use datafusion_expr::LogicalPlan;
 
+use crate::delta_datafusion::DataFusionResult;
+
 /// Deltaplanner
+#[derive(Debug)]
 pub struct DeltaPlanner<T: ExtensionPlanner> {
     /// custom extension planner
     pub extension_planner: T,
 }
 
 #[async_trait]
-impl<T: ExtensionPlanner + Send + Sync + 'static + Clone> QueryPlanner for DeltaPlanner<T> {
+impl<T: ExtensionPlanner + Send + Sync + 'static + Clone + std::fmt::Debug> QueryPlanner
+    for DeltaPlanner<T>
+{
     async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,
