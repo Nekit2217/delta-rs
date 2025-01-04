@@ -1,8 +1,10 @@
 import datetime
 import os
 import pathlib
+from decimal import Decimal
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from deltalake import DeltaTable, write_deltalake
@@ -1120,3 +1122,72 @@ def test_merge_non_nullable(tmp_path):
             target_alias="t",
             predicate="s.id = t.id",
         ).when_matched_update_all().when_not_matched_insert_all().execute()
+
+
+def test_merge_when_wrong_but_castable_type_passed_while_merge(
+    tmp_path: pathlib.Path, sample_table: pa.Table
+):
+    write_deltalake(tmp_path, sample_table, mode="append")
+
+    dt = DeltaTable(tmp_path)
+
+    source_table = pa.table(
+        {
+            "id": pa.array(["7", "8"]),
+            "price": pa.array(["1", "2"], pa.string()),
+            "sold": pa.array([1, 2], pa.int32()),
+            "deleted": pa.array([False, False]),
+        }
+    )
+    dt.merge(
+        source=source_table,
+        predicate="t.id = s.id",
+        source_alias="s",
+        target_alias="t",
+    ).when_not_matched_insert_all().execute()
+
+    table_schema = pq.read_table(
+        tmp_path / dt.get_add_actions().column(0)[0].as_py()
+    ).schema
+    assert table_schema.field("price").type == sample_table["price"].type
+
+
+def test_merge_on_decimal_3033(tmp_path):
+    data = {
+        "timestamp": [datetime.datetime(2024, 3, 20, 12, 30, 0)],
+        "altitude": [Decimal("150.5")],
+    }
+
+    table = pa.Table.from_pydict(data)
+
+    schema = pa.schema(
+        [
+            ("timestamp", pa.timestamp("us")),
+            ("altitude", pa.decimal128(6, 1)),
+        ]
+    )
+
+    dt = DeltaTable.create(tmp_path, schema=schema)
+
+    write_deltalake(dt, table, mode="append")
+
+    dt.merge(
+        source=table,
+        predicate="target.timestamp = source.timestamp",
+        source_alias="source",
+        target_alias="target",
+    ).when_matched_update_all().when_not_matched_insert_all().execute()
+
+    dt.merge(
+        source=table,
+        predicate="target.timestamp = source.timestamp AND target.altitude = source.altitude",
+        source_alias="source",
+        target_alias="target",
+    ).when_matched_update_all().when_not_matched_insert_all().execute()
+
+    string_predicate = dt.history(1)[0]["operationParameters"]["predicate"]
+
+    assert (
+        string_predicate
+        == "timestamp BETWEEN arrow_cast('2024-03-20T12:30:00.000000', 'Timestamp(Microsecond, None)') AND arrow_cast('2024-03-20T12:30:00.000000', 'Timestamp(Microsecond, None)') AND altitude BETWEEN '1505'::decimal(4, 1) AND '1505'::decimal(4, 1)"
+    )

@@ -5,7 +5,7 @@ resolver = "2"
 
 [workspace.package]
 authors = ["Qingping Hou <dave2008713@gmail.com>"]
-rust-version = "1.80"
+rust-version = "1.81"
 keywords = ["deltalake", "delta", "datalake"]
 readme = "README.md"
 edition = "2021"
@@ -27,8 +27,7 @@ debug = "line-tables-only"
 
 [workspace.dependencies]
 delta_kernel = { git="https://github.com/Nekit2217/delta-kernel-rs", branch="bm-main" }
-# delta_kernel = { version = "0.4.1", features = ["default-engine"] }
-delta_kernel = { version = "0.4.1", features = ["default-engine"] }
+delta_kernel = { version = "0.6.0", features = ["default-engine"] }
 #delta_kernel = { path = "../delta-kernel-rs/kernel", features = ["sync-engine"]  }
 
 # arrow
@@ -43,7 +42,7 @@ arrow-ord = { version = "53" }
 arrow-row = { version = "53" }
 arrow-schema = { version = "53" }
 arrow-select = { version = "53" }
-object_store = { version = "0.11" }
+object_store = { version = "0.11.2" }
 parquet = { version = "53" }
 arrow = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
 arrow-arith = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
@@ -60,16 +59,6 @@ object_store = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master"
 parquet = { git="https://github.com/Nekit2217/arrow-rs", branch="bm-master" }
 
 # datafusion
-datafusion = { version = "43" }
-datafusion-expr = { version = "43" }
-datafusion-common = { version = "43" }
-datafusion-ffi = { version = "43" }
-datafusion-functions = { version = "43" }
-datafusion-functions-aggregate = { version = "43" }
-datafusion-physical-expr = { version = "43" }
-datafusion-physical-plan = { version = "43" }
-datafusion-proto = { version = "43" }
-datafusion-sql = { version = "43" }
 datafusion = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
 datafusion-expr = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
 datafusion-common = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
@@ -78,6 +67,16 @@ datafusion-sql = { git="https://github.com/Nekit2217/arrow-datafusion", branch="
 datafusion-physical-expr = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
 datafusion-functions = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
 datafusion-functions-aggregate = { git="https://github.com/Nekit2217/arrow-datafusion", branch="bm-main" }
+datafusion = { version = "44" }
+datafusion-expr = { version = "44" }
+datafusion-common = { version = "44" }
+datafusion-ffi = { version = "44" }
+datafusion-functions = { version = "44" }
+datafusion-functions-aggregate = { version = "44" }
+datafusion-physical-expr = { version = "44" }
+datafusion-physical-plan = { version = "44" }
+datafusion-proto = { version = "44" }
+datafusion-sql = { version = "44" }
 
 # serde
 serde = { version = "1.0.194", features = ["derive"] }

@@ -60,6 +60,21 @@ impl S3ObjectStoreFactory {
                 }
             }
         }
+
+        // All S3-like Object Stores use conditional put, object-store crate however still requires you to explicitly
+        // set this behaviour. We will however assume, when a locking provider/copy-if-not-exists keys are not provided
+        // that PutIfAbsent is supported.
+        // With conditional put in S3-like API we can use the deltalake default logstore which use PutIfAbsent
+        if !options.0.keys().any(|key| {
+            let key = key.to_ascii_lowercase();
+            [
+                AmazonS3ConfigKey::ConditionalPut.as_ref(),
+                "conditional_put",
+            ]
+            .contains(&key.as_str())
+        }) {
+            options.0.insert("conditional_put".into(), "etag".into());
+        }
         options
     }
 }
@@ -110,31 +125,19 @@ fn aws_storage_handler(
     store: ObjectStoreRef,
     options: &StorageOptions,
 ) -> DeltaResult<ObjectStoreRef> {
-    // If the copy-if-not-exists env var is set or ConditionalPut is set, we don't need to instantiate a locking client or check for allow-unsafe-rename.
-    if options
-        .0
-        .contains_key(AmazonS3ConfigKey::CopyIfNotExists.as_ref())
-        || options
-            .0
-            .contains_key(AmazonS3ConfigKey::ConditionalPut.as_ref())
+    let s3_options = S3StorageOptions::from_map(&options.0)?;
+    // Nearly all S3 Object stores support conditional put, so we change the default to always returning an S3 Object store
+    // unless explicitly passing a locking provider key or allow_unsafe_rename. Then we will pass it to the old S3StorageBackend.
+    if s3_options.locking_provider.as_deref() == Some("dynamodb") || s3_options.allow_unsafe_rename
     {
-        Ok(store)
-    } else {
-        let s3_options = S3StorageOptions::from_map(&options.0)?;
-
-            let store = S3StorageBackend::try_new(
-                store,
-                Some("dynamodb") == s3_options.locking_provider.as_deref()
-                    || s3_options.allow_unsafe_rename,
-                url.clone(),
-                storage_options.clone(),
-            )?;
         let store = S3StorageBackend::try_new(
             store,
             Some("dynamodb") == s3_options.locking_provider.as_deref()
                 || s3_options.allow_unsafe_rename,
         )?;
         Ok(Arc::new(store))
+    } else {
+        Ok(store)
     }
 }
 
@@ -149,7 +152,9 @@ fn is_aws(options: &StorageOptions) -> bool {
     if options.0.contains_key(constants::AWS_S3_LOCKING_PROVIDER) {
         return true;
     }
-    !options.0.contains_key(constants::AWS_ENDPOINT_URL)
+    // Options at this stage should only contain 'aws_endpoint' in lowercase
+    // due to with_env_s3
+    !(options.0.contains_key("aws_endpoint") || options.0.contains_key(constants::AWS_ENDPOINT_URL))
 }
 
 /// Options used to configure the [S3StorageBackend].
@@ -886,6 +891,7 @@ mod tests {
         ScopedEnv::run(|| {
             clear_env_of_aws_keys();
             std::env::remove_var(constants::AWS_ENDPOINT_URL);
+
             let options = S3StorageOptions::from_map(&hashmap! {
                 constants::AWS_REGION.to_string() => "eu-west-1".to_string(),
                 constants::AWS_ACCESS_KEY_ID.to_string() => "test".to_string(),
@@ -1067,19 +1073,20 @@ mod tests {
         ScopedEnv::run(|| {
             clear_env_of_aws_keys();
             let raw_options = hashmap! {};
-
             std::env::set_var(constants::AWS_ACCESS_KEY_ID, "env_key");
             std::env::set_var(constants::AWS_ENDPOINT_URL, "env_key");
             std::env::set_var(constants::AWS_SECRET_ACCESS_KEY, "env_key");
             std::env::set_var(constants::AWS_REGION, "env_key");
-
             let combined_options =
                 S3ObjectStoreFactory {}.with_env_s3(&StorageOptions(raw_options));
 
-            assert_eq!(combined_options.0.len(), 4);
+            // Four and then the conditional_put built-in
+            assert_eq!(combined_options.0.len(), 5);
 
-            for v in combined_options.0.values() {
-                assert_eq!(v, "env_key");
+            for (key, v) in combined_options.0 {
+                if key != "conditional_put" {
+                    assert_eq!(v, "env_key");
+                }
             }
         });
     }
@@ -1095,7 +1102,6 @@ mod tests {
                 "AWS_SECRET_ACCESS_KEY".to_string() => "options_key".to_string(),
                 "AWS_REGION".to_string() => "options_key".to_string()
             };
-
             std::env::set_var("aws_access_key_id", "env_key");
             std::env::set_var("aws_endpoint", "env_key");
             std::env::set_var("aws_secret_access_key", "env_key");
@@ -1104,8 +1110,10 @@ mod tests {
             let combined_options =
                 S3ObjectStoreFactory {}.with_env_s3(&StorageOptions(raw_options));
 
-            for v in combined_options.0.values() {
-                assert_eq!(v, "options_key");
+            for (key, v) in combined_options.0 {
+                if key != "conditional_put" {
+                    assert_eq!(v, "options_key");
+                }
             }
         });
     }
@@ -1121,9 +1129,15 @@ mod tests {
         let options = StorageOptions::from(minio);
         assert!(!is_aws(&options));
 
+        let minio: HashMap<String, String> = hashmap! {
+            "aws_endpoint".to_string() => "http://minio:8080".to_string(),
+        };
+        let options = StorageOptions::from(minio);
+        assert!(!is_aws(&options));
+
         let localstack: HashMap<String, String> = hashmap! {
             constants::AWS_FORCE_CREDENTIAL_LOAD.to_string() => "true".to_string(),
-            constants::AWS_ENDPOINT_URL.to_string() => "http://minio:8080".to_string(),
+            "aws_endpoint".to_string() => "http://minio:8080".to_string(),
         };
         let options = StorageOptions::from(localstack);
         assert!(is_aws(&options));

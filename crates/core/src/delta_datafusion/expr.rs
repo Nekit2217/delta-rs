@@ -99,14 +99,13 @@ impl ScalarUDFImpl for MakeParquetArray {
         r_type
     }
 
-    fn invoke(&self, args: &[ColumnarValue]) -> Result<ColumnarValue> {
+    fn invoke_batch(&self, args: &[ColumnarValue], number_rows: usize) -> Result<ColumnarValue> {
         let mut data_type = DataType::Null;
         for arg in args {
             data_type = arg.data_type();
         }
 
-        #[allow(deprecated)]
-        match self.actual.invoke(args)? {
+        match self.actual.invoke_batch(args, number_rows)? {
             ColumnarValue::Scalar(ScalarValue::List(df_array)) => {
                 let field = Arc::new(Field::new("element", data_type, true));
                 let result = Ok(ColumnarValue::Scalar(ScalarValue::List(Arc::new(
@@ -125,10 +124,6 @@ impl ScalarUDFImpl for MakeParquetArray {
                 Ok(others)
             }
         }
-    }
-
-    fn invoke_no_args(&self, number_rows: usize) -> Result<ColumnarValue> {
-        self.actual.invoke_batch(&[], number_rows)
     }
 
     fn aliases(&self) -> &[String] {
@@ -217,7 +212,7 @@ impl<'a> DeltaContextProvider<'a> {
     }
 }
 
-impl<'a> ContextProvider for DeltaContextProvider<'a> {
+impl ContextProvider for DeltaContextProvider<'_> {
     fn get_table_source(&self, _name: TableReference) -> DFResult<Arc<dyn TableSource>> {
         unimplemented!()
     }
@@ -234,16 +229,16 @@ impl<'a> ContextProvider for DeltaContextProvider<'a> {
         self.state.aggregate_functions().get(name).cloned()
     }
 
+    fn get_window_meta(&self, name: &str) -> Option<Arc<datafusion_expr::WindowUDF>> {
+        self.state.window_functions().get(name).cloned()
+    }
+
     fn get_variable_type(&self, _var: &[String]) -> Option<DataType> {
         unimplemented!()
     }
 
     fn options(&self) -> &ConfigOptions {
         self.state.config_options()
-    }
-
-    fn get_window_meta(&self, name: &str) -> Option<Arc<datafusion_expr::WindowUDF>> {
-        self.state.window_functions().get(name).cloned()
     }
 
     fn udf_names(&self) -> Vec<String> {
@@ -304,7 +299,7 @@ struct BinaryExprFormat<'a> {
     expr: &'a BinaryExpr,
 }
 
-impl<'a> Display for BinaryExprFormat<'a> {
+impl Display for BinaryExprFormat<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Put parentheses around child binary expressions so that we can see the difference
         // between `(a OR b) AND c` and `a OR (b AND c)`. We only insert parentheses when needed,
@@ -333,7 +328,7 @@ impl<'a> Display for BinaryExprFormat<'a> {
     }
 }
 
-impl<'a> Display for SqlFormat<'a> {
+impl Display for SqlFormat<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.expr {
             Expr::Column(c) => write!(f, "{c}"),
@@ -488,7 +483,7 @@ struct ScalarValueFormat<'a> {
     scalar: &'a ScalarValue,
 }
 
-impl<'a> fmt::Display for ScalarValueFormat<'a> {
+impl fmt::Display for ScalarValueFormat<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self.scalar {
             ScalarValue::Boolean(e) => format_option!(f, e)?,
@@ -502,6 +497,10 @@ impl<'a> fmt::Display for ScalarValueFormat<'a> {
             ScalarValue::UInt16(e) => format_option!(f, e)?,
             ScalarValue::UInt32(e) => format_option!(f, e)?,
             ScalarValue::UInt64(e) => format_option!(f, e)?,
+            ScalarValue::Decimal128(e, precision, scale) => match e {
+                Some(e) => write!(f, "'{e}'::decimal({precision}, {scale})",)?,
+                None => write!(f, "NULL")?,
+            },
             ScalarValue::Date32(e) => match e {
                 Some(e) => write!(
                     f,
@@ -655,6 +654,11 @@ mod test {
             StructField::new(
                 "_binary".to_string(),
                 DataType::Primitive(PrimitiveType::Binary),
+                true,
+            ),
+            StructField::new(
+                "_decimal".to_string(),
+                DataType::Primitive(PrimitiveType::Decimal(2, 2)),
                 true,
             ),
             StructField::new(
@@ -887,6 +891,18 @@ mod test {
                     )
                 )),
             },
+            ParseTest {
+                expr: col("_decimal").eq(lit(ScalarValue::Decimal128(Some(1),2,2))),
+                expected: "_decimal = '1'::decimal(2, 2)".to_string(),
+                override_expected_expr: Some(col("_decimal").eq(
+                    Expr::Cast(
+                        Cast {
+                            expr: Box::from(lit("1")),
+                            data_type: arrow_schema::DataType::Decimal128(2, 2)
+                        }
+                    )
+                )),
+            },
         ];
 
         let session: SessionContext = DeltaSessionContext::default().into();
@@ -908,11 +924,6 @@ mod test {
         }
 
         let unsupported_types = vec![
-            /* TODO: Determine proper way to display decimal values in an sql expression*/
-            simple!(
-                col("money").gt(lit(ScalarValue::Decimal128(Some(100), 12, 2))),
-                "money > 0.1".to_string()
-            ),
             simple!(
                 col("_timestamp").gt(lit(ScalarValue::TimestampMillisecond(Some(100), None))),
                 "".to_string()

@@ -21,18 +21,12 @@ use delta_kernel::expressions::Scalar;
 use delta_kernel::schema::StructField;
 use deltalake::arrow::compute::concat_batches;
 use deltalake::arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
-use deltalake::arrow::pyarrow::ToPyArrow;
 use deltalake::arrow::record_batch::{RecordBatch, RecordBatchIterator};
 use deltalake::arrow::{self, datatypes::Schema as ArrowSchema};
 use deltalake::checkpoints::{cleanup_metadata, create_checkpoint};
-use deltalake::datafusion::datasource::provider_as_source;
-use deltalake::datafusion::logical_expr::{LogicalPlanBuilder, UNNAMED_TABLE};
 use deltalake::datafusion::physical_plan::ExecutionPlan;
-use deltalake::datafusion::prelude::{DataFrame, SessionContext};
-use deltalake::delta_datafusion::{
-    DataFusionMixins, DeltaDataChecker, DeltaScanConfigBuilder, DeltaSessionConfig,
-    DeltaTableProvider,
-};
+use deltalake::datafusion::prelude::SessionContext;
+use deltalake::delta_datafusion::DeltaDataChecker;
 use deltalake::errors::DeltaTableError;
 use deltalake::kernel::{
     scalars::ScalarExt, Action, Add, Invariant, LogicalFile, Remove, StructType, Transaction,
@@ -675,7 +669,8 @@ impl RawDeltaTable {
         Ok(())
     }
 
-    #[pyo3(signature = (starting_version = 0, ending_version = None, starting_timestamp = None, ending_timestamp = None, columns = None))]
+    #[pyo3(signature = (starting_version = 0, ending_version = None, starting_timestamp = None, ending_timestamp = None, columns = None, allow_out_of_range = false))]
+    #[allow(clippy::too_many_arguments)]
     pub fn load_cdf(
         &mut self,
         py: Python,
@@ -684,6 +679,7 @@ impl RawDeltaTable {
         starting_timestamp: Option<String>,
         ending_timestamp: Option<String>,
         columns: Option<Vec<String>>,
+        allow_out_of_range: bool,
     ) -> PyResult<PyArrowType<ArrowArrayStreamReader>> {
         let ctx = SessionContext::new();
         let mut cdf_read = CdfLoadBuilder::new(
@@ -706,6 +702,10 @@ impl RawDeltaTable {
                 .map_err(|pe| PyValueError::new_err(pe.to_string()))?
                 .to_utc();
             cdf_read = cdf_read.with_ending_timestamp(ending_ts);
+        }
+
+        if allow_out_of_range {
+            cdf_read = cdf_read.with_allow_out_of_range();
         }
 
         if let Some(columns) = columns {
