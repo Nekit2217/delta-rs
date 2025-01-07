@@ -71,7 +71,7 @@ impl S3ObjectStoreFactory {
                 AmazonS3ConfigKey::ConditionalPut.as_ref(),
                 "conditional_put",
             ]
-            .contains(&key.as_str())
+                .contains(&key.as_str())
         }) {
             options.0.insert("conditional_put".into(), "etag".into());
         }
@@ -191,7 +191,7 @@ impl PartialEq for S3StorageOptions {
             && self.s3_pool_idle_timeout == other.s3_pool_idle_timeout
             && self.sts_pool_idle_timeout == other.sts_pool_idle_timeout
             && self.s3_get_internal_server_error_retries
-                == other.s3_get_internal_server_error_retries
+            == other.s3_get_internal_server_error_retries
             && self.allow_unsafe_rename == other.allow_unsafe_rename
             && self.extra_opts == other.extra_opts
     }
@@ -297,9 +297,9 @@ impl S3StorageOptions {
 }
 
 fn execute_sdk_future<F, T>(future: F) -> DeltaResult<T>
-where
-    T: Send,
-    F: Future<Output = T> + Send,
+    where
+        T: Send,
+        F: Future<Output = T> + Send,
 {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => match handle.runtime_flavor() {
@@ -336,9 +336,6 @@ pub struct S3StorageBackend {
     inner: ObjectStoreRef,
     /// Whether allowed to performance rename_if_not_exist as rename
     allow_unsafe_rename: bool,
-    url: Url,
-    options: StorageOptions,
-    is_retry: bool,
 }
 
 impl std::fmt::Display for S3StorageBackend {
@@ -355,58 +352,11 @@ impl S3StorageBackend {
     /// Creates a new S3StorageBackend.
     ///
     /// Options are described in [constants].
-    pub fn try_new(
-        storage: ObjectStoreRef,
-        allow_unsafe_rename: bool,
-        url: Url,
-        options: StorageOptions
-    ) -> ObjectStoreResult<Self> {
+    pub fn try_new(storage: ObjectStoreRef, allow_unsafe_rename: bool) -> ObjectStoreResult<Self> {
         Ok(Self {
             inner: storage,
             allow_unsafe_rename,
-            url,
-            options,
-            is_retry: false,
         })
-    }
-
-    pub fn set_is_retry(&mut self, is_it: bool) {
-        self.is_retry = is_it;
-    }
-
-    pub fn tmp_client(&self) -> DeltaResult<ObjectStoreRef> {
-        let (inner, prefix) = parse_url_opts(
-            &self.url,
-            self.options.0.iter().filter_map(|(key, value)| {
-                let s3_key = AmazonS3ConfigKey::from_str(&key.to_ascii_lowercase()).ok()?;
-                Some((s3_key, value.clone()))
-            }),
-        )?;
-
-        let store = limit_store_handler(inner, &self.options);
-
-        // If the copy-if-not-exists env var is set, we don't need to instantiate a locking client or check for allow-unsafe-rename.
-        if self.options
-            .0
-            .contains_key(AmazonS3ConfigKey::CopyIfNotExists.as_ref())
-        {
-            return Ok(store);
-        } else {
-            let s3_options = S3StorageOptions::from_map(&self.options.0)?;
-
-            let mut store = S3StorageBackend::try_new(
-                store,
-                Some("dynamodb") == s3_options.locking_provider.as_deref()
-                    || s3_options.allow_unsafe_rename,
-                self.url.clone(),
-                self.options.clone(),
-            )?;
-
-            store.set_is_retry(true);
-
-            return Ok(Arc::new(store));
-        }
-
     }
 }
 
@@ -423,27 +373,7 @@ impl Debug for S3StorageBackend {
 #[async_trait::async_trait]
 impl ObjectStore for S3StorageBackend {
     async fn put(&self, location: &Path, bytes: PutPayload) -> ObjectStoreResult<PutResult> {
-        debug!("put {location:}");
-        match self.inner.put(location, bytes.clone()).await {
-            Ok(v) => { return Ok(v) },
-            Err(e) => {
-                match e {
-                    ObjectStoreError::Generic { store, source } => {
-                        if self.is_retry {
-                            return Err(ObjectStoreError::Generic { store, source })
-                        }
-                    },
-                    _ => { return Err(e) },
-                }
-            }
-        }
-
-        match self.tmp_client() {
-            Ok(v) => v.put(location, bytes).await,
-            Err(e) => {
-                panic!("{}", format!("Cannot reconnect on put function put: {:?}", e))
-            }
-        }
+        self.inner.put(location, bytes).await
     }
 
     async fn put_opts(
@@ -452,27 +382,7 @@ impl ObjectStore for S3StorageBackend {
         bytes: PutPayload,
         options: PutOptions,
     ) -> ObjectStoreResult<PutResult> {
-        debug!("put_opts {location:}");
-        match self.inner.put_opts(location, bytes.clone(), options.clone()).await {
-            Ok(v) => { return Ok(v) },
-            Err(e) => {
-                match e {
-                    ObjectStoreError::Generic { store, source } => {
-                        if self.is_retry {
-                            return Err(ObjectStoreError::Generic { store, source })
-                        }
-                    },
-                    _ => { return Err(e) },
-                }
-            }
-        }
-
-        match self.tmp_client() {
-            Ok(v) => v.put_opts(location, bytes, options).await,
-            Err(e) => {
-                panic!("{}", format!("Cannot reconnect on put function put_opts: {:?}", e))
-            }
-        }
+        self.inner.put_opts(location, bytes, options).await
     }
 
     async fn put_multipart(&self, location: &Path) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
@@ -488,133 +398,23 @@ impl ObjectStore for S3StorageBackend {
     }
 
     async fn get(&self, location: &Path) -> ObjectStoreResult<GetResult> {
-        debug!("get {location:}");
-        match self.inner.get(location).await {
-            Ok(v) => { return Ok(v) },
-            Err(e) => {
-                match e {
-                    ObjectStoreError::Generic { store, source } => {
-                        if self.is_retry {
-                            return Err(ObjectStoreError::Generic { store, source })
-                        }
-                    },
-                    _ => { return Err(e) },
-                }
-            }
-        }
-
-        match self.tmp_client() {
-            Ok(v) => v.get(location).await,
-            Err(e) => {
-                panic!("{}", format!("Cannot reconnect on put function get: {:?}", e))
-            }
-        }
+        self.inner.get(location).await
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> ObjectStoreResult<GetResult> {
-        let rec_options = GetOptions {
-            if_match: options.if_match.clone(),
-            if_none_match: options.if_none_match.clone(),
-            if_modified_since: options.if_modified_since.clone(),
-            if_unmodified_since: options.if_unmodified_since.clone(),
-            range: options.range.clone(),
-            version: options.version.clone(),
-            head: options.head.clone(),
-        };
-
-        debug!("get_opts {location:}");
-        match self.inner.get_opts(location, options).await {
-            Ok(v) => { return Ok(v) },
-            Err(e) => {
-                match e {
-                    ObjectStoreError::Generic { store, source } => {
-                        if self.is_retry {
-                            return Err(ObjectStoreError::Generic { store, source })
-                        }
-                    },
-                    _ => { return Err(e) },
-                }
-            }
-        }
-
-        match self.tmp_client() {
-            Ok(v) => v.get_opts(location, rec_options).await,
-            Err(e) => {
-                panic!("{}", format!("Cannot reconnect on put function get_opts: {:?}", e))
-            }
-        }
+        self.inner.get_opts(location, options).await
     }
 
     async fn get_range(&self, location: &Path, range: Range<usize>) -> ObjectStoreResult<Bytes> {
-        debug!("get_range {location:}, {}", range.end - range.start);
-        match self.inner.get_range(location, range.clone()).await {
-            Ok(v) => { return Ok(v) },
-            Err(e) => {
-                match e {
-                    ObjectStoreError::Generic { store, source } => {
-                        if self.is_retry {
-                            return Err(ObjectStoreError::Generic { store, source })
-                        }
-                    },
-                    _ => { return Err(e) },
-                }
-            }
-        }
-
-        match self.tmp_client() {
-            Ok(v) => v.get_range(location, range).await,
-            Err(e) => {
-                panic!("{}", format!("Cannot reconnect on put function get_range: {:?}", e))
-            }
-        }
+        self.inner.get_range(location, range).await
     }
 
     async fn head(&self, location: &Path) -> ObjectStoreResult<ObjectMeta> {
-        debug!("head {location:}");
-        match self.inner.head(location).await {
-            Ok(v) => { return Ok(v) },
-            Err(e) => {
-                match e {
-                    ObjectStoreError::Generic { store, source } => {
-                        if self.is_retry {
-                            return Err(ObjectStoreError::Generic { store, source })
-                        }
-                    },
-                    _ => { return Err(e) },
-                }
-            }
-        }
-
-        match self.tmp_client() {
-            Ok(v) => v.head(location).await,
-            Err(e) => {
-                panic!("{}", format!("Cannot reconnect on put function head: {:?}", e))
-            }
-        }
+        self.inner.head(location).await
     }
 
     async fn delete(&self, location: &Path) -> ObjectStoreResult<()> {
-        debug!("delete {location:}");
-        match self.inner.delete(location).await {
-            Ok(v) => { return Ok(v) },
-            Err(e) => {
-                match e {
-                    ObjectStoreError::Generic { store, source } => {
-                        if self.is_retry {
-                            return Err(ObjectStoreError::Generic { store, source })
-                        }
-                    },
-                    _ => { return Err(e) },
-                }
-            }
-        }
-
-        match self.tmp_client() {
-            Ok(v) => v.delete(location).await,
-            Err(e) => {
-                panic!("{}", format!("Cannot reconnect on put function delete: {:?}", e))
-            }
-        }
+        self.inner.delete(location).await
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, ObjectStoreResult<ObjectMeta>> {
@@ -630,49 +430,11 @@ impl ObjectStore for S3StorageBackend {
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> ObjectStoreResult<ListResult> {
-        match self.inner.list_with_delimiter(prefix).await {
-            Ok(v) => { return Ok(v) },
-            Err(e) => {
-                match e {
-                    ObjectStoreError::Generic { store, source } => {
-                        if self.is_retry {
-                            return Err(ObjectStoreError::Generic { store, source })
-                        }
-                    },
-                    _ => { return Err(e) },
-                }
-            }
-        }
-
-                match self.tmp_client() {
-            Ok(v) => v.list_with_delimiter(prefix).await,
-            Err(e) => {
-                panic!("{}", format!("Cannot reconnect on put function list_with_delimiter: {:?}", e))
-            }
-        }
+        self.inner.list_with_delimiter(prefix).await
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
-        match self.inner.copy(from, to).await {
-            Ok(v) => { return Ok(v) },
-            Err(e) => {
-                match e {
-                    ObjectStoreError::Generic { store, source } => {
-                        if self.is_retry {
-                            return Err(ObjectStoreError::Generic { store, source })
-                        }
-                    },
-                    _ => { return Err(e) },
-                }
-            }
-        }
-
-        match self.tmp_client() {
-            Ok(v) => v.copy(from, to).await,
-            Err(e) => {
-                panic!("{}", format!("Cannot reconnect on put function copy: {:?}", e))
-            }
-        }
+        self.inner.copy(from, to).await
     }
 
     async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> ObjectStoreResult<()> {
@@ -687,61 +449,6 @@ impl ObjectStore for S3StorageBackend {
                 store: STORE_NAME,
                 source: Box::new(crate::errors::LockClientError::LockClientRequired),
             })
-        }
-    }
-
-    async fn put_multipart(
-        &self,
-        location: &Path,
-    ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
-        debug!("put_multipart {location:}");
-        match self.inner.put_multipart(location).await {
-            Ok(v) => { return Ok(v) },
-            Err(e) => {
-                match e {
-                    ObjectStoreError::Generic { store, source } => {
-                        if self.is_retry {
-                            return Err(ObjectStoreError::Generic { store, source })
-                        }
-                    },
-                    _ => { return Err(e) },
-                }
-            }
-        }
-
-        match self.tmp_client() {
-            Ok(v) => v.put_multipart(location).await,
-            Err(e) => {
-                panic!("{}", format!("Cannot reconnect on put function put_multipart: {:?}", e))
-            }
-        }
-    }
-
-    async fn put_multipart_opts(
-        &self,
-        location: &Path,
-        options: PutMultipartOpts,
-    ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
-        debug!("put_multipart_opts {location:}");
-        match self.inner.put_multipart_opts(location, options.clone()).await {
-            Ok(v) => { return Ok(v) },
-            Err(e) => {
-                match e {
-                    ObjectStoreError::Generic { store, source } => {
-                        if self.is_retry {
-                            return Err(ObjectStoreError::Generic { store, source })
-                        }
-                    },
-                    _ => { return Err(e) },
-                }
-            }
-        }
-
-        match self.tmp_client() {
-            Ok(v) => v.put_multipart_opts(location, options).await,
-            Err(e) => {
-                panic!("{}", format!("Cannot reconnect on put function put_multipart: {:?}", e))
-            }
         }
     }
 }
@@ -848,12 +555,12 @@ mod tests {
             std::env::set_var(constants::AWS_IAM_ROLE_SESSION_NAME, "session_name");
             std::env::set_var(
                 #[allow(deprecated)]
-                constants::AWS_S3_ASSUME_ROLE_ARN,
+                    constants::AWS_S3_ASSUME_ROLE_ARN,
                 "arn:aws:iam::123456789012:role/some_role",
             );
             std::env::set_var(
                 #[allow(deprecated)]
-                constants::AWS_S3_ROLE_SESSION_NAME,
+                    constants::AWS_S3_ROLE_SESSION_NAME,
                 "session_name",
             );
             std::env::set_var(constants::AWS_WEB_IDENTITY_TOKEN_FILE, "token_file");
@@ -897,7 +604,7 @@ mod tests {
                 constants::AWS_ACCESS_KEY_ID.to_string() => "test".to_string(),
                 constants::AWS_SECRET_ACCESS_KEY.to_string() => "test_secret".to_string(),
             })
-            .unwrap();
+                .unwrap();
 
             let mut expected = S3StorageOptions::try_default().unwrap();
             expected.sdk_config = Some(
@@ -1008,7 +715,7 @@ mod tests {
                 constants::AWS_REGION.to_string() => "us-west-2".to_string(),
                 "AWS_S3_GET_INTERNAL_SERVER_ERROR_RETRIES".to_string() => "3".to_string(),
             })
-            .unwrap();
+                .unwrap();
 
             assert_eq!(
                 S3StorageOptions {
