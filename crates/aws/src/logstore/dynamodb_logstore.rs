@@ -3,11 +3,15 @@
 //! when the underlying object storage does not support atomic `put_if_absent`
 //! or `rename_if_absent` operations, as is the case for S3.
 
+use std::env;
+use std::time::Duration;
 use crate::errors::LockClientError;
 use crate::storage::S3StorageOptions;
 use crate::{constants, CommitEntry, DynamoDbLockClient, UpdateLogEntryResult};
 
 use bytes::Bytes;
+use rand::Rng;
+use tokio::time::sleep;
 use deltalake_core::{ObjectStoreError, Path};
 use tracing::{debug, error, warn};
 use url::Url;
@@ -20,7 +24,7 @@ use deltalake_core::{
 };
 
 const STORE_NAME: &str = "DeltaS3ObjectStore";
-const MAX_REPAIR_RETRIES: i64 = 3;
+const MAX_REPAIR_RETRIES: usize = 3;
 
 /// [`LogStore`] implementation backed by DynamoDb
 pub struct S3DynamoDbLogStore {
@@ -28,6 +32,7 @@ pub struct S3DynamoDbLogStore {
     lock_client: DynamoDbLockClient,
     config: LogStoreConfig,
     table_path: String,
+    retry: usize,
 }
 
 impl std::fmt::Debug for S3DynamoDbLogStore {
@@ -71,6 +76,11 @@ impl S3DynamoDbLogStore {
             },
         })?;
         let table_path = to_uri(&location, &Path::from(""));
+        let retry = env::var("DELTA_DYNAMO_RETRY_TIMES")
+            .unwrap_or(MAX_REPAIR_RETRIES.to_string())
+            .parse::<usize>()
+            .unwrap_or_else(|_| MAX_REPAIR_RETRIES);
+
         Ok(Self {
             storage: object_store,
             lock_client,
@@ -79,6 +89,7 @@ impl S3DynamoDbLogStore {
                 options: options.into(),
             },
             table_path,
+            retry,
         })
     }
 
@@ -92,7 +103,7 @@ impl S3DynamoDbLogStore {
         if entry.complete {
             return Ok(RepairLogEntryResult::AlreadyCompleted);
         }
-        for retry in 0..=MAX_REPAIR_RETRIES {
+        for retry in 0..=self.retry {
             match write_commit_entry(&self.storage, entry.version, &entry.temp_path).await {
                 Ok(()) => {
                     debug!("Successfully committed entry for version {}", entry.version);
@@ -105,13 +116,15 @@ impl S3DynamoDbLogStore {
                     warn!("It looks like the {}.json has already been moved, we got 404 from ObjectStorage.", entry.version);
                     return self.try_complete_entry(entry, false).await;
                 }
-                Err(err) if retry == MAX_REPAIR_RETRIES => return Err(err),
+                Err(err) if retry == self.retry => return Err(err),
                 Err(err) => {
                     debug!("retry #{retry} on log entry {entry:?} failed to move commit: '{err}'")
                 }
             }
+            let secs = rand::thread_rng().gen_range(0..=3);
+            sleep(Duration::from_secs(secs)).await;
         }
-        unreachable!("for loop yields Ok or Err in body when retry = MAX_REPAIR_RETRIES")
+        unreachable!("for loop yields Ok or Err in body when retry = self.retry")
     }
 
     /// Update an incomplete log entry to completed.
@@ -121,7 +134,7 @@ impl S3DynamoDbLogStore {
         copy_performed: bool,
     ) -> Result<RepairLogEntryResult, TransactionError> {
         debug!("try_complete_entry for {:?}, {}", entry, copy_performed);
-        for retry in 0..=MAX_REPAIR_RETRIES {
+        for retry in 0..=self.retry {
             match self
                 .lock_client
                 .update_commit_entry(entry.version, &self.table_path)
@@ -134,13 +147,15 @@ impl S3DynamoDbLogStore {
                     source: Box::new(err),
                 }) {
                 Ok(x) => return Ok(Self::map_retry_result(x, copy_performed)),
-                Err(err) if retry == MAX_REPAIR_RETRIES => return Err(err),
+                Err(err) if retry == self.retry => return Err(err),
                 Err(err) => error!(
                     "retry #{retry} on log entry {entry:?} failed to update lock db: '{err}'"
                 ),
             }
+            let secs = rand::thread_rng().gen_range(0..=3);
+            sleep(Duration::from_secs(secs)).await;
         }
-        unreachable!("for loop yields Ok or Err in body when retyr = MAX_REPAIR_RETRIES")
+        unreachable!("for loop yields Ok or Err in body when retyr = self.retry")
     }
 
     fn map_retry_result(
@@ -171,16 +186,35 @@ impl LogStore for S3DynamoDbLogStore {
     }
 
     async fn refresh(&self) -> DeltaResult<()> {
-        let entry = self
-            .lock_client
-            .get_latest_entry(&self.table_path)
-            .await
-            .map_err(|err| DeltaTableError::GenericError {
-                source: Box::new(err),
-            })?;
-        if let Some(entry) = entry {
-            self.repair_entry(&entry).await?;
-        }
+        let mut current_retry = self.retry;
+
+        loop {
+            let entry_response = self
+                .lock_client
+                .get_latest_entry(&self.table_path)
+                .await
+                .map_err(|err| DeltaTableError::GenericError {
+                    source: Box::new(err),
+                });
+
+            match entry_response {
+                Ok(success) => {
+                    if let Some(entry) = success {
+                        self.repair_entry(&entry).await?;
+                    }
+                    break
+                }
+                Err(e) => {
+                    let secs = rand::thread_rng().gen_range(0..=2);
+                    sleep(Duration::from_secs(secs)).await;
+                    if current_retry <= 0 {
+                        return Err(e)
+                    };
+                    current_retry -= 1;
+                }
+            }
+        };
+
         Ok(())
     }
 
@@ -284,20 +318,37 @@ impl LogStore for S3DynamoDbLogStore {
 
     async fn get_latest_version(&self, current_version: i64) -> DeltaResult<i64> {
         debug!("Retrieving latest version of {self:?} at v{current_version}");
-        let entry = self
-            .lock_client
-            .get_latest_entry(&self.table_path)
-            .await
-            .map_err(|err| DeltaTableError::GenericError {
-                source: Box::new(err),
-            })?;
-        // when there is a latest entry in DynamoDb, we can avoid the file listing in S3.
-        if let Some(entry) = entry {
-            self.repair_entry(&entry).await?;
-            Ok(entry.version)
-        } else {
-            get_latest_version(self, current_version).await
-        }
+        let mut current_retry = self.retry;
+
+        loop {
+            let entry_response = self
+                .lock_client
+                .get_latest_entry(&self.table_path)
+                .await
+                .map_err(|err| DeltaTableError::GenericError {
+                    source: Box::new(err),
+                });
+
+            match entry_response {
+                Ok(success) => {
+                    return match success {
+                        None => { get_latest_version(self, current_version).await }
+                        Some(entry) => {
+                            self.repair_entry(&entry).await?;
+                            Ok(entry.version)
+                        }
+                    }
+                }
+                Err(e) => {
+                    let secs = rand::thread_rng().gen_range(0..=2);
+                    sleep(Duration::from_secs(secs)).await;
+                    if current_retry <= 0 {
+                        return Err(e)
+                    };
+                    current_retry -= 1;
+                }
+            }
+        };
     }
 
     async fn get_earliest_version(&self, current_version: i64) -> DeltaResult<i64> {
