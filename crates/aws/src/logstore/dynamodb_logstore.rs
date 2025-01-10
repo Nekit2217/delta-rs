@@ -121,7 +121,6 @@ impl S3DynamoDbLogStore {
                     debug!("retry #{retry} on log entry {entry:?} failed to move commit: '{err}'")
                 }
             }
-            sleep(Duration::from_millis(50)).await;
         }
         unreachable!("for loop yields Ok or Err in body when retry = self.retry")
     }
@@ -151,7 +150,6 @@ impl S3DynamoDbLogStore {
                     "retry #{retry} on log entry {entry:?} failed to update lock db: '{err}'"
                 ),
             }
-            sleep(Duration::from_millis(50)).await;
         }
         unreachable!("for loop yields Ok or Err in body when retyr = self.retry")
     }
@@ -203,7 +201,6 @@ impl LogStore for S3DynamoDbLogStore {
                     break
                 }
                 Err(e) => {
-                    sleep(Duration::from_millis(50)).await;
                     if current_retry <= 0 {
                         return Err(e)
                     };
@@ -337,7 +334,6 @@ impl LogStore for S3DynamoDbLogStore {
                     }
                 }
                 Err(e) => {
-                    sleep(Duration::from_millis(50)).await;
                     if current_retry <= 0 {
                         return Err(e)
                     };
