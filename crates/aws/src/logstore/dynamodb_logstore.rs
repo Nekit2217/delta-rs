@@ -121,8 +121,7 @@ impl S3DynamoDbLogStore {
                     debug!("retry #{retry} on log entry {entry:?} failed to move commit: '{err}'")
                 }
             }
-            let secs = rand::thread_rng().gen_range(0..=3);
-            sleep(Duration::from_secs(secs)).await;
+            sleep(Duration::from_millis(50)).await;
         }
         unreachable!("for loop yields Ok or Err in body when retry = self.retry")
     }
@@ -152,8 +151,7 @@ impl S3DynamoDbLogStore {
                     "retry #{retry} on log entry {entry:?} failed to update lock db: '{err}'"
                 ),
             }
-            let secs = rand::thread_rng().gen_range(0..=3);
-            sleep(Duration::from_secs(secs)).await;
+            sleep(Duration::from_millis(50)).await;
         }
         unreachable!("for loop yields Ok or Err in body when retyr = self.retry")
     }
@@ -205,8 +203,7 @@ impl LogStore for S3DynamoDbLogStore {
                     break
                 }
                 Err(e) => {
-                    let secs = rand::thread_rng().gen_range(0..=2);
-                    sleep(Duration::from_secs(secs)).await;
+                    sleep(Duration::from_millis(50)).await;
                     if current_retry <= 0 {
                         return Err(e)
                     };
@@ -340,8 +337,7 @@ impl LogStore for S3DynamoDbLogStore {
                     }
                 }
                 Err(e) => {
-                    let secs = rand::thread_rng().gen_range(0..=2);
-                    sleep(Duration::from_secs(secs)).await;
+                    sleep(Duration::from_millis(50)).await;
                     if current_retry <= 0 {
                         return Err(e)
                     };
