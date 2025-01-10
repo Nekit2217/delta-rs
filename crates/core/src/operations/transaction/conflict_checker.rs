@@ -588,7 +588,7 @@ impl<'a> ConflictChecker<'a> {
             .collect();
         if !txn_overlap.is_empty() {
             error!("TXN OVERLAP, {:?}", txn_overlap);
-            info!("\nWinning txns: {:?}\nApp txns: {:?}", self.txn_info.read_app_ids);
+            info!("\nWinning txns: {:?}\nApp txns: {:?}", winning_txns, self.txn_info.read_app_ids);
             Ok(())
             // Err(CommitConflictError::ConcurrentTransaction)
         } else {
