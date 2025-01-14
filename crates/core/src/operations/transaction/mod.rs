@@ -310,9 +310,9 @@ impl CommitData {
 #[derive(Clone, Debug, Copy)]
 /// Properties for post commit hook.
 pub struct PostCommitHookProperties {
-    create_checkpoint: bool,
+    pub create_checkpoint: bool,
     /// Override the EnableExpiredLogCleanUp setting, if None config setting is used
-    cleanup_expired_logs: Option<bool>,
+    pub cleanup_expired_logs: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
