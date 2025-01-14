@@ -718,6 +718,7 @@ impl PostCommit<'_> {
         log_store: &LogStoreRef,
         version: i64,
     ) -> DeltaResult<()> {
+        info!("Creating a checkpoint");
         if !table_state.load_config().require_files {
             warn!("Checkpoint creation in post_commit_hook has been skipped due to table being initialized without files.");
             return Ok(());
