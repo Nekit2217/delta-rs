@@ -21,7 +21,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::log::*;
 use url::Url;
-use deltalake_core::datafusion::optimizer::test::user_defined::new;
 use crate::constants;
 use crate::errors::DynamoDbConfigError;
 #[cfg(feature = "native-tls")]
@@ -371,11 +370,12 @@ impl S3StorageBackend {
         self.is_retry = is_it;
     }
 
-    pub fn tmp_client(&self) -> ObjectStoreRef {
+    pub fn tmp_client(&self) -> Result<S3StorageBackend, DeltaTableError> {
         let factory = S3ObjectStoreFactory {};
         let (new_inner, _) = factory.parse_url_opts(&self.url, &self.options)?;
-        new_inner.set_is_retry(true);
-        new_inner
+        let mut tmp_client = S3StorageBackend::try_new(new_inner, self.allow_unsafe_rename, self.url.clone(), self.options.clone())?;
+        tmp_client.set_is_retry(true);
+        Ok(tmp_client)
     }
 }
 
