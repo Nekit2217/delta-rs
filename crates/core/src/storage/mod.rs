@@ -475,10 +475,10 @@ pub fn limit_store_handler<T: ObjectStore>(store: T, options: &StorageOptions) -
         .get(storage_constants::OBJECT_STORE_CONCURRENCY_LIMIT)
         .and_then(|v| v.parse().ok());
     info!("concurrency_limit {:?}", concurrency_limit);
-    if let Some(env_concurrency_limit) = env::var(storage_constants::OBJECT_STORE_CONCURRENCY_LIMIT) {
+    if let Ok(env_concurrency_limit) = env::var(storage_constants::OBJECT_STORE_CONCURRENCY_LIMIT) {
         info!("Limited Store Handler from env {}", env_concurrency_limit);
         if concurrency_limit.is_none() {
-            concurrency_limit = env_concurrency_limit
+            concurrency_limit = env_concurrency_limit.parse::<usize>().ok();
         }
     }
 
