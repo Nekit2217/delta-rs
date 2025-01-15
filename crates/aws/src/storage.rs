@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::log::*;
 use url::Url;
-
+use deltalake_core::datafusion::optimizer::test::user_defined::new;
 use crate::constants;
 use crate::errors::DynamoDbConfigError;
 #[cfg(feature = "native-tls")]
@@ -113,8 +113,7 @@ impl ObjectStoreFactory for S3ObjectStoreFactory {
         }
 
         let inner = builder.build()?;
-
-        let store = aws_storage_handler(limit_store_handler(inner, &options), &options)?;
+        let store = aws_storage_handler(limit_store_handler(inner, &options), &options, url.clone())?;
         debug!("Initialized the object store: {store:?}");
 
         Ok((store, prefix))
@@ -124,6 +123,7 @@ impl ObjectStoreFactory for S3ObjectStoreFactory {
 fn aws_storage_handler(
     store: ObjectStoreRef,
     options: &StorageOptions,
+    url: Url,
 ) -> DeltaResult<ObjectStoreRef> {
     let s3_options = S3StorageOptions::from_map(&options.0)?;
     // Nearly all S3 Object stores support conditional put, so we change the default to always returning an S3 Object store
@@ -134,6 +134,8 @@ fn aws_storage_handler(
             store,
             Some("dynamodb") == s3_options.locking_provider.as_deref()
                 || s3_options.allow_unsafe_rename,
+            url,
+            options.clone(),
         )?;
         Ok(Arc::new(store))
     } else {
@@ -333,9 +335,12 @@ fn execute_sdk_future<F, T>(future: F) -> DeltaResult<T>
 
 /// An S3 implementation of the [ObjectStore] trait
 pub struct S3StorageBackend {
-    inner: ObjectStoreRef,
+    pub inner: ObjectStoreRef,
     /// Whether allowed to performance rename_if_not_exist as rename
     allow_unsafe_rename: bool,
+    is_retry: bool,
+    url: Url,
+    options: StorageOptions
 }
 
 impl std::fmt::Display for S3StorageBackend {
@@ -352,11 +357,25 @@ impl S3StorageBackend {
     /// Creates a new S3StorageBackend.
     ///
     /// Options are described in [constants].
-    pub fn try_new(storage: ObjectStoreRef, allow_unsafe_rename: bool) -> ObjectStoreResult<Self> {
+    pub fn try_new(storage: ObjectStoreRef, allow_unsafe_rename: bool, url: Url, options: StorageOptions) -> ObjectStoreResult<Self> {
         Ok(Self {
             inner: storage,
             allow_unsafe_rename,
+            is_retry: false,
+            url,
+            options,
         })
+    }
+
+    pub fn set_is_retry(&mut self, is_it: bool) {
+        self.is_retry = is_it;
+    }
+
+    pub fn tmp_client(&self) -> ObjectStoreRef {
+        let factory = S3ObjectStoreFactory {};
+        let (new_inner, _) = factory.parse_url_opts(&self.url, &self.options)?;
+        new_inner.set_is_retry(true);
+        new_inner
     }
 }
 
@@ -373,7 +392,27 @@ impl Debug for S3StorageBackend {
 #[async_trait::async_trait]
 impl ObjectStore for S3StorageBackend {
     async fn put(&self, location: &Path, bytes: PutPayload) -> ObjectStoreResult<PutResult> {
-        self.inner.put(location, bytes).await
+        debug!("put {location:}");
+        match self.inner.put(location, bytes.clone()).await {
+            Ok(v) => { return Ok(v) },
+            Err(e) => {
+                match e {
+                    ObjectStoreError::Generic { store, source } => {
+                        if self.is_retry {
+                            return Err(ObjectStoreError::Generic { store, source })
+                        }
+                    },
+                    _ => { return Err(e) },
+                }
+            }
+        }
+
+        match self.tmp_client() {
+            Ok(v) => v.put(location, bytes).await,
+            Err(e) => {
+                panic!("{}", format!("Cannot reconnect on put function put: {:?}", e))
+            }
+        }
     }
 
     async fn put_opts(
@@ -382,39 +421,157 @@ impl ObjectStore for S3StorageBackend {
         bytes: PutPayload,
         options: PutOptions,
     ) -> ObjectStoreResult<PutResult> {
-        self.inner.put_opts(location, bytes, options).await
-    }
+        debug!("put_opts {location:}");
+        match self.inner.put_opts(location, bytes.clone(), options.clone()).await {
+            Ok(v) => { return Ok(v) },
+            Err(e) => {
+                match e {
+                    ObjectStoreError::Generic { store, source } => {
+                        if self.is_retry {
+                            return Err(ObjectStoreError::Generic { store, source })
+                        }
+                    },
+                    _ => { return Err(e) },
+                }
+            }
+        }
 
-    async fn put_multipart(&self, location: &Path) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
-        self.inner.put_multipart(location).await
-    }
-
-    async fn put_multipart_opts(
-        &self,
-        location: &Path,
-        options: PutMultipartOpts,
-    ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
-        self.inner.put_multipart_opts(location, options).await
+        match self.tmp_client() {
+            Ok(v) => v.put_opts(location, bytes, options).await,
+            Err(e) => {
+                panic!("{}", format!("Cannot reconnect on put function put_opts: {:?}", e))
+            }
+        }
     }
 
     async fn get(&self, location: &Path) -> ObjectStoreResult<GetResult> {
-        self.inner.get(location).await
+        debug!("get {location:}");
+        match self.inner.get(location).await {
+            Ok(v) => { return Ok(v) },
+            Err(e) => {
+                match e {
+                    ObjectStoreError::Generic { store, source } => {
+                        if self.is_retry {
+                            return Err(ObjectStoreError::Generic { store, source })
+                        }
+                    },
+                    _ => { return Err(e) },
+                }
+            }
+        }
+
+        match self.tmp_client() {
+            Ok(v) => v.get(location).await,
+            Err(e) => {
+                panic!("{}", format!("Cannot reconnect on put function get: {:?}", e))
+            }
+        }
     }
 
     async fn get_opts(&self, location: &Path, options: GetOptions) -> ObjectStoreResult<GetResult> {
-        self.inner.get_opts(location, options).await
+        let rec_options = GetOptions {
+            if_match: options.if_match.clone(),
+            if_none_match: options.if_none_match.clone(),
+            if_modified_since: options.if_modified_since.clone(),
+            if_unmodified_since: options.if_unmodified_since.clone(),
+            range: options.range.clone(),
+            version: options.version.clone(),
+            head: options.head.clone(),
+        };
+
+        debug!("get_opts {location:}");
+        match self.inner.get_opts(location, options).await {
+            Ok(v) => { return Ok(v) },
+            Err(e) => {
+                match e {
+                    ObjectStoreError::Generic { store, source } => {
+                        if self.is_retry {
+                            return Err(ObjectStoreError::Generic { store, source })
+                        }
+                    },
+                    _ => { return Err(e) },
+                }
+            }
+        }
+
+        match self.tmp_client() {
+            Ok(v) => v.get_opts(location, rec_options).await,
+            Err(e) => {
+                panic!("{}", format!("Cannot reconnect on put function get_opts: {:?}", e))
+            }
+        }
     }
 
     async fn get_range(&self, location: &Path, range: Range<usize>) -> ObjectStoreResult<Bytes> {
-        self.inner.get_range(location, range).await
+        debug!("get_range {location:}, {}", range.end - range.start);
+        match self.inner.get_range(location, range.clone()).await {
+            Ok(v) => { return Ok(v) },
+            Err(e) => {
+                match e {
+                    ObjectStoreError::Generic { store, source } => {
+                        if self.is_retry {
+                            return Err(ObjectStoreError::Generic { store, source })
+                        }
+                    },
+                    _ => { return Err(e) },
+                }
+            }
+        }
+
+        match self.tmp_client() {
+            Ok(v) => v.get_range(location, range).await,
+            Err(e) => {
+                panic!("{}", format!("Cannot reconnect on put function get_range: {:?}", e))
+            }
+        }
     }
 
     async fn head(&self, location: &Path) -> ObjectStoreResult<ObjectMeta> {
-        self.inner.head(location).await
+        debug!("head {location:}");
+        match self.inner.head(location).await {
+            Ok(v) => { return Ok(v) },
+            Err(e) => {
+                match e {
+                    ObjectStoreError::Generic { store, source } => {
+                        if self.is_retry {
+                            return Err(ObjectStoreError::Generic { store, source })
+                        }
+                    },
+                    _ => { return Err(e) },
+                }
+            }
+        }
+
+        match self.tmp_client() {
+            Ok(v) => v.head(location).await,
+            Err(e) => {
+                panic!("{}", format!("Cannot reconnect on put function head: {:?}", e))
+            }
+        }
     }
 
     async fn delete(&self, location: &Path) -> ObjectStoreResult<()> {
-        self.inner.delete(location).await
+        debug!("delete {location:}");
+        match self.inner.delete(location).await {
+            Ok(v) => { return Ok(v) },
+            Err(e) => {
+                match e {
+                    ObjectStoreError::Generic { store, source } => {
+                        if self.is_retry {
+                            return Err(ObjectStoreError::Generic { store, source })
+                        }
+                    },
+                    _ => { return Err(e) },
+                }
+            }
+        }
+
+        match self.tmp_client() {
+            Ok(v) => v.delete(location).await,
+            Err(e) => {
+                panic!("{}", format!("Cannot reconnect on put function delete: {:?}", e))
+            }
+        }
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, ObjectStoreResult<ObjectMeta>> {
@@ -430,11 +587,49 @@ impl ObjectStore for S3StorageBackend {
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> ObjectStoreResult<ListResult> {
-        self.inner.list_with_delimiter(prefix).await
+        match self.inner.list_with_delimiter(prefix).await {
+            Ok(v) => { return Ok(v) },
+            Err(e) => {
+                match e {
+                    ObjectStoreError::Generic { store, source } => {
+                        if self.is_retry {
+                            return Err(ObjectStoreError::Generic { store, source })
+                        }
+                    },
+                    _ => { return Err(e) },
+                }
+            }
+        }
+
+        match self.tmp_client() {
+            Ok(v) => v.list_with_delimiter(prefix).await,
+            Err(e) => {
+                panic!("{}", format!("Cannot reconnect on put function list_with_delimiter: {:?}", e))
+            }
+        }
     }
 
     async fn copy(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
-        self.inner.copy(from, to).await
+        match self.inner.copy(from, to).await {
+            Ok(v) => { return Ok(v) },
+            Err(e) => {
+                match e {
+                    ObjectStoreError::Generic { store, source } => {
+                        if self.is_retry {
+                            return Err(ObjectStoreError::Generic { store, source })
+                        }
+                    },
+                    _ => { return Err(e) },
+                }
+            }
+        }
+
+        match self.tmp_client() {
+            Ok(v) => v.copy(from, to).await,
+            Err(e) => {
+                panic!("{}", format!("Cannot reconnect on put function copy: {:?}", e))
+            }
+        }
     }
 
     async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> ObjectStoreResult<()> {
@@ -449,6 +644,61 @@ impl ObjectStore for S3StorageBackend {
                 store: STORE_NAME,
                 source: Box::new(crate::errors::LockClientError::LockClientRequired),
             })
+        }
+    }
+
+    async fn put_multipart(
+        &self,
+        location: &Path,
+    ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
+        debug!("put_multipart {location:}");
+        match self.inner.put_multipart(location).await {
+            Ok(v) => { return Ok(v) },
+            Err(e) => {
+                match e {
+                    ObjectStoreError::Generic { store, source } => {
+                        if self.is_retry {
+                            return Err(ObjectStoreError::Generic { store, source })
+                        }
+                    },
+                    _ => { return Err(e) },
+                }
+            }
+        }
+
+        match self.tmp_client() {
+            Ok(v) => v.put_multipart(location).await,
+            Err(e) => {
+                panic!("{}", format!("Cannot reconnect on put function put_multipart: {:?}", e))
+            }
+        }
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        options: PutMultipartOpts,
+    ) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
+        debug!("put_multipart_opts {location:}");
+        match self.inner.put_multipart_opts(location, options.clone()).await {
+            Ok(v) => { return Ok(v) },
+            Err(e) => {
+                match e {
+                    ObjectStoreError::Generic { store, source } => {
+                        if self.is_retry {
+                            return Err(ObjectStoreError::Generic { store, source })
+                        }
+                    },
+                    _ => { return Err(e) },
+                }
+            }
+        }
+
+        match self.tmp_client() {
+            Ok(v) => v.put_multipart_opts(location, options).await,
+            Err(e) => {
+                panic!("{}", format!("Cannot reconnect on put function put_multipart: {:?}", e))
+            }
         }
     }
 }
