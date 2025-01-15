@@ -1,5 +1,6 @@
 //! Object storage backend abstraction layer for Delta Table transaction logs and data
 use std::collections::HashMap;
+use std::env;
 use std::sync::{Arc, OnceLock};
 
 use crate::{DeltaResult, DeltaTableError};
@@ -28,6 +29,7 @@ pub use object_store::{
 use object_store::{MultipartUpload, PutMultipartOpts};
 pub use retry_ext::ObjectStoreRetryExt;
 use std::ops::Range;
+use tracing::info;
 pub use utils::*;
 
 pub mod file;
@@ -468,10 +470,17 @@ pub fn url_prefix_handler<T: ObjectStore>(store: T, prefix: Path) -> ObjectStore
 /// Limits the number of concurrent connections the underlying object store
 /// Reference [LimitStore](https://docs.rs/object_store/latest/object_store/limit/struct.LimitStore.html) for more information
 pub fn limit_store_handler<T: ObjectStore>(store: T, options: &StorageOptions) -> ObjectStoreRef {
-    let concurrency_limit = options
+    let mut concurrency_limit = options
         .0
         .get(storage_constants::OBJECT_STORE_CONCURRENCY_LIMIT)
         .and_then(|v| v.parse().ok());
+    info!("concurrency_limit {:?}", concurrency_limit);
+    if let Some(env_concurrency_limit) = env::var(storage_constants::OBJECT_STORE_CONCURRENCY_LIMIT) {
+        info!("Limited Store Handler from env {}", env_concurrency_limit);
+        if concurrency_limit.is_none() {
+            concurrency_limit = env_concurrency_limit
+        }
+    }
 
     if let Some(limit) = concurrency_limit {
         Arc::new(LimitStore::new(store, limit))
