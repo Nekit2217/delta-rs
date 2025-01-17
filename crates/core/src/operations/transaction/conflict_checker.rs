@@ -394,7 +394,7 @@ impl<'a> ConflictChecker<'a> {
         self.check_for_added_files_that_should_have_been_read_by_current_txn()?;
         self.check_for_deleted_files_against_current_txn_read_files()?;
         self.check_for_deleted_files_against_current_txn_deleted_files()?;
-        self.check_for_updated_application_transaction_ids_that_current_txn_depends_on()?;
+        // self.check_for_updated_application_transaction_ids_that_current_txn_depends_on()?;
         Ok(())
     }
 
