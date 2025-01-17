@@ -394,7 +394,7 @@ impl<'a> ConflictChecker<'a> {
         self.check_for_added_files_that_should_have_been_read_by_current_txn()?;
         self.check_for_deleted_files_against_current_txn_read_files()?;
         self.check_for_deleted_files_against_current_txn_deleted_files()?;
-        // self.check_for_updated_application_transaction_ids_that_current_txn_depends_on()?;
+        self.check_for_updated_application_transaction_ids_that_current_txn_depends_on()?;
         Ok(())
     }
 
@@ -589,8 +589,7 @@ impl<'a> ConflictChecker<'a> {
         if !txn_overlap.is_empty() {
             error!("TXN OVERLAP, {:?}", txn_overlap);
             info!("\nWinning txns: {:?}\nApp txns: {:?}", winning_txns, self.txn_info.read_app_ids);
-            Ok(())
-            // Err(CommitConflictError::ConcurrentTransaction)
+            Err(CommitConflictError::ConcurrentTransaction)
         } else {
             Ok(())
         }
