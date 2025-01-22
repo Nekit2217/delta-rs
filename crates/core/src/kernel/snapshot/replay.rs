@@ -490,10 +490,21 @@ impl LogReplayScanner {
             is_not_null(add_col)?
         };
 
+        let ignore_add_actions = std::env::var("IGNORE_ADD_ACTIONS_FOR_READ")
+            .ok()
+            .and_then(|val| val.parse().ok())
+            .unwrap_or(false);
+
         let filtered = filter_record_batch(batch, &filter)?;
         let add_col = ex::extract_and_cast::<StructArray>(&filtered, "add")?;
         let maybe_remove_col = ex::extract_and_cast_opt::<StructArray>(&filtered, "remove");
-        let add_actions = read_file_info(add_col)?;
+        let add_actions;
+
+        if ignore_add_actions {
+            add_actions = Vec::new();
+        } else {
+            add_actions = read_file_info(add_col)?;
+        }
 
         let mut keep = Vec::with_capacity(filtered.num_rows());
         if let Some(remove_col) = maybe_remove_col {
