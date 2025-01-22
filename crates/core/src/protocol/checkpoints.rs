@@ -145,6 +145,13 @@ pub async fn create_checkpoint_for(
     state: &DeltaTableState,
     log_store: &dyn LogStore,
 ) -> Result<(), ProtocolError> {
+    let write_checkpoints = std::env::var("WRITE_CHECKPOINTS")
+        .ok()
+        .and_then(|val| val.parse().ok())
+        .unwrap_or(false);
+    if !write_checkpoints {
+        return Ok(());
+    }
     if !state.load_config().require_files {
         return Err(ProtocolError::Generic(
             "Table has not yet been initialized with files, therefore creating a checkpoint is not possible.".to_string()
