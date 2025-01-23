@@ -548,9 +548,13 @@ impl DynamoDbLockClient {
         Wn: Fn(&E) -> bool,
     {
         use backon::Retryable;
-        let backoff = backon::ExponentialBuilder::default()
-            .with_factor(2.)
-            .with_max_delay(self.config.max_elapsed_request_time);
+        let max_times = std::env::var(constants::NUMBER_OF_RETRY)
+            .ok()
+            .and_then(|val| val.parse::<usize>().ok()) // Парсим строку в целое число
+            .unwrap_or(100);
+        let backoff = backon::ConstantBuilder::default()
+            .with_max_times(max_times)
+            .with_delay(self.config.max_elapsed_request_time);
         operation.retry(backoff).when(when).await
     }
 }

@@ -138,6 +138,7 @@ pub const DEFAULT_LOCK_TABLE_NAME: &str = "delta_log";
 pub const LOCK_TABLE_KEY_NAME: &str = "DELTA_DYNAMO_TABLE_NAME";
 pub const BILLING_MODE_KEY_NAME: &str = "DELTA_DYNAMO_BILLING_MODE";
 pub const MAX_ELAPSED_REQUEST_TIME_KEY_NAME: &str = "DELTA_DYNAMO_MAX_ELAPSED_REQUEST_TIME";
+pub const NUMBER_OF_RETRY: &str = "DELTA_DYNAMO_NUMBER_OF_RETRY";
 
 pub const ATTR_TABLE_PATH: &str = "tablePath";
 pub const ATTR_FILE_NAME: &str = "fileName";
