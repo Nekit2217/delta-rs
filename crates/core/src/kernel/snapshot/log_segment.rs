@@ -14,7 +14,7 @@ use parquet::arrow::async_reader::{ParquetObjectReader, ParquetRecordBatchStream
 use parquet::arrow::ProjectionMask;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, info};
 
 use super::parse;
 use crate::kernel::{arrow::json, ActionType, Metadata, Protocol, Schema, StructType};
@@ -94,7 +94,7 @@ impl LogSegment {
             (Some(cp), Some(v)) if cp.version <= v => {
                 list_log_files_with_checkpoint(&cp, store, &log_url).await?
             }
-            _ => list_log_files(store, &log_url, version, None).await?,
+            _ => list_log_files(store, &log_url, version, None, false).await?,
         };
 
         // remove all files above requested version
@@ -141,13 +141,23 @@ impl LogSegment {
             "try_new_slice: start_version: {}, end_version: {:?}",
             start_version, end_version
         );
+        // info!("{:?}", log_store.config().options);
         log_store.refresh().await?;
         let log_url = table_root.child("_delta_log");
+        let ignore_checkpoints = log_store
+            .config()
+            .options
+            .0
+            .get("ignore_checkpoint_for_update")
+            .unwrap_or(&String::from("false"))
+            .parse()
+            .unwrap_or(false);
         let (mut commit_files, checkpoint_files) = list_log_files(
             log_store.object_store().as_ref(),
             &log_url,
             end_version,
             Some(start_version),
+            ignore_checkpoints,
         )
         .await?;
         // remove all files above requested version
@@ -489,10 +499,12 @@ pub(super) async fn list_log_files(
     log_root: &Path,
     max_version: Option<i64>,
     start_version: Option<i64>,
+    ignore_checkpoints: bool,
 ) -> DeltaResult<(Vec<ObjectMeta>, Vec<ObjectMeta>)> {
     let max_version = max_version.unwrap_or(i64::MAX - 1);
     let start_from = log_root.child(format!("{:020}", start_version.unwrap_or(0)).as_str());
 
+    info!("version {:?}", start_version);
     let mut max_checkpoint_version = -1_i64;
     let mut commit_files = Vec::with_capacity(25);
     let mut checkpoint_files = Vec::with_capacity(10);
@@ -506,6 +518,9 @@ pub(super) async fn list_log_files(
             && meta.location.commit_version() >= start_version
         {
             if meta.location.is_checkpoint_file() {
+                if start_version.unwrap_or(0) > 0 && ignore_checkpoints {
+                    continue;
+                }
                 let version = meta.location.commit_version().unwrap_or(0);
                 match version.cmp(&max_checkpoint_version) {
                     Ordering::Greater => {
