@@ -442,6 +442,7 @@ async fn list_log_files_with_checkpoint(
     fs_client: &dyn ObjectStore,
     log_root: &Path,
 ) -> DeltaResult<(Vec<ObjectMeta>, Vec<ObjectMeta>)> {
+    info!("Read list log files with checkpoint");
     let version_prefix = format!("{:020}", cp.version);
     let start_from = log_root.child(version_prefix.as_str());
 
