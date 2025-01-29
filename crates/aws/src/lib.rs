@@ -181,8 +181,8 @@ impl DynamoDbLockClient {
         let max_elapsed_request_time = max_elapsed_request_time
             .or_else(|| std::env::var(constants::MAX_ELAPSED_REQUEST_TIME_KEY_NAME).ok())
             .map_or_else(
-                || Ok(Duration::from_secs(60)),
-                |secs| u64::from_str(&secs).map(Duration::from_secs),
+                || Ok(Duration::from_millis(60)),
+                |secs| u64::from_str(&secs).map(Duration::from_millis),
             )
             .map_err(|err| DynamoDbConfigError::ParseMaxElapsedRequestTime { source: err })?;
 
